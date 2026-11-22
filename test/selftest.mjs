@@ -59,6 +59,12 @@ const preflight = await httpJson({
 });
 check('pairing/code 预检 → 204 + CORS', preflight.status === 204
   && String(preflight.headers?.['access-control-allow-origin'] ?? '') === '*');
+const preflightRevoke = await httpJson({
+  port, method: 'OPTIONS', path: '/mobile/v1/pairing/revoke-device',
+  headers: { origin: 'app://dsh', 'access-control-request-method': 'POST' },
+});
+check('revoke-device 预检 → 204 + CORS（白名单缺失时下线按钮报 Failed to fetch）',
+  preflightRevoke.status === 204 && String(preflightRevoke.headers?.['access-control-allow-origin'] ?? '') === '*');
 const tasksCors = await httpJson({ port, path: '/mobile/v1/tasks' });
 check('白名单外路由不发 CORS 头', tasksCors.headers?.['access-control-allow-origin'] === undefined);
 

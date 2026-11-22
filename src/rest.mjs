@@ -99,6 +99,10 @@ const DESKTOP_CORS_PATHS = [
   /^\/mobile\/v1\/health$/,
   /^\/mobile\/v1\/desktop\/summary$/,
   /^\/mobile\/v1\/pairing\/code$/,
+  // 「同时在线设备」逐台下线：路由响应带 DESKTOP_CORS，但预检也必须放行——
+  // 否则 OPTIONS 落到 4404，浏览器报 Failed to fetch，POST 根本发不出去
+  // （2026-11-22 真机复现；与下面 tunnel 按钮那批是同一类遗漏）。
+  /^\/mobile\/v1\/pairing\/revoke-device$/,
   // 桌面面板的隧道按钮原本就在调这两个端点，但没进白名单：请求其实发出去了，
   // 只是响应被浏览器拦下，面板只能显示「操作失败」——隧道其实已经起来了。
   /^\/mobile\/v1\/tunnel\/start$/,
