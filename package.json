@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-ios",
-  "version": "0.2.22",
+  "version": "0.3.0",
   "type": "module",
   "description": "DSH iOS移动伴侣：iPhone/iPad 扫码连接 DSH 桌面端，局域网直连 + Cloudflare Tunnel 固定域名远程两种通道",
   "main": "entries/plugin.mjs",
@@ -29,7 +29,7 @@
   "scripts": {
     "start": "node entries/sidecar.mjs --host=mock --dev",
     "start:lan": "node entries/sidecar.mjs --host=mock --dev --lan=true",
-    "test": "node test/selftest.mjs && node test/version.mjs && node test/lan-ip.mjs && node test/update-dialog.mjs && node test/ops.mjs && node test/resilience.mjs && node test/borrowed.mjs && node test/mux-table.mjs && node test/live-frames.mjs && node test/artifacts.mjs && node test/attachments.mjs && node test/session-actions.mjs && node test/workspace-actions.mjs && node test/workspace-index.mjs && node test/workspace-create.mjs && node test/timeline-attachments.mjs && node test/enhance.mjs && node test/tunnel-named.mjs && node test/tar.mjs && node test/cloudflared-install.mjs && node test/install-continue.mjs && node test/dns-recheck.mjs && node test/tunnel-credentials.mjs && node test/tunnel-login.mjs && node test/plugin-selfupdate.mjs && node test/zone-moved.mjs",
+    "test": "node test/selftest.mjs && node test/version.mjs && node test/lan-ip.mjs && node test/update-dialog.mjs && node test/ops.mjs && node test/resilience.mjs && node test/borrowed.mjs && node test/mux-table.mjs && node test/live-frames.mjs && node test/artifacts.mjs && node test/attachments.mjs && node test/session-actions.mjs && node test/workspace-actions.mjs && node test/workspace-index.mjs && node test/workspace-create.mjs && node test/timeline-attachments.mjs && node test/enhance.mjs && node test/tunnel-named.mjs && node test/tar.mjs && node test/cloudflared-install.mjs && node test/install-progress.mjs && node test/install-continue.mjs && node test/dns-recheck.mjs && node test/tunnel-credentials.mjs && node test/tunnel-login.mjs && node test/plugin-selfupdate.mjs && node test/zone-moved.mjs",
     "probe": "node spike0/probe.mjs"
   },
   "dsh": {

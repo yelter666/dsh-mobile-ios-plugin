@@ -6,7 +6,8 @@ import { translateRecords } from './adapter/session-history.mjs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import { PLUGIN_VERSION } from './version.mjs';
-import { ensureCloudflared, resolveAsset } from './cloudflared-install.mjs';
+import { resolveAsset } from './cloudflared-install.mjs';
+import { startInstall, installStatus, cancelInstall } from './cloudflared-install-job.mjs';
 import { selfUpdatePlugin } from './plugin-update.mjs';
 import { resolveNs } from './dns-probe.mjs';
 import { createLoginManager } from './cloudflared-login.mjs';
@@ -103,6 +104,7 @@ const DESKTOP_CORS_PATHS = [
   /^\/mobile\/v1\/tunnel\/stop$/,
   /^\/mobile\/v1\/tunnel\/provision$/,
   /^\/mobile\/v1\/tunnel\/install-cloudflared$/,
+  /^\/mobile\/v1\/tunnel\/install-cloudflared\/cancel$/,
   /^\/mobile\/v1\/tunnel\/recheck-dns$/,
   /^\/mobile\/v1\/tunnel\/reset$/,
   /^\/mobile\/v1\/tunnel\/login$/,
@@ -293,6 +295,10 @@ export function createRestRouter({ core, pairing, host, tickets, config = {}, lo
       login: loginManager.status(),
       // 面板据此决定是否显示「自动安装 cloudflared」入口：仅在缺失且有官方构建时为 true。
       canAutoInstall: base.executable === 'missing' && !!resolveAsset({}),
+      // 确认弹窗在下载**之前**就给出官方地址：慢网络下用户可直接用浏览器/下载器自救。
+      downloadUrl: resolveAsset({})?.url || null,
+      // 安装任务的实时状态（idle/running/done/failed/canceled），面板刷新后可恢复进度。
+      install: installStatus(),
     };
   };
 
@@ -553,25 +559,53 @@ export function createRestRouter({ core, pairing, host, tickets, config = {}, lo
    * 自举安装 cloudflared（每机首次开启远程）。回环-only：只有主机本机能触发下载执行。
    * 面板必须先弹窗得到用户同意才调用此端点；服务端不做静默后台安装。
    * 下载源固定为 Cloudflare 官方 Release，落点私有组件目录，不改系统 PATH。
+   *
+   * 0.3.0：POST 改为「启动任务后立刻返回」，不再等 53MB 下载完；
+   * 面板通过 GET 轮询真实字节进度，POST /cancel 可中途退出。
+   * 旧版同步语义（res.reused / executable）仍通过返回值保留，客户端两条分支都能走。
    */
   route('POST', /^\/mobile\/v1\/tunnel\/install-cloudflared$/, async (ctx) => {
     loopbackOnly(ctx, '安装 cloudflared 只允许在主机本机操作');
     if (!config.tunnel) throw fail(4021, '隧道能力未启用', { method: 'tunnel.installCloudflared' });
     let result;
     try {
-      result = await ensureCloudflared();
+      result = startInstall({
+        onSuccess: (installed) => {
+          // 回填路径：刚装好的二进制不在 PATH 里，开通器如果还拿裸名字 execFile 会 ENOENT。
+          // 任务结束时回填，让「装完 → 同一次会话里继续开通」不必重启宿主。
+          config.tunnelProvisioner?.useExecutable?.(installed.executable);
+        },
+      });
     } catch (err) {
-      log(`rest  tunnel install-cloudflared 失败 ${err?.code || ''} ${err?.message || err}`);
+      log(`rest  tunnel install-cloudflared 启动失败 ${err?.code || ''} ${err?.message || err}`);
       throw fail(4500, err?.message || '自动安装 cloudflared 失败', {
         code: err?.code || 'INSTALL_FAILED',
       });
     }
-    log(`rest  tunnel install-cloudflared ${result.reused ? '复用' : '已装'} ${result.executable}`);
-    // 回填路径：刚装好的二进制不在 PATH 里，开通器如果还拿裸名字去 execFile 会 ENOENT。
-    // 这一步让「装完 → 同一次会话里继续开通」真正成立，不必重启宿主。
-    config.tunnelProvisioner?.useExecutable?.(result.executable);
-    // 立即重取状态：findCloudflared 已把组件目录纳入发现链，装完应马上从 missing 变 found。
+    if (result.reused) {
+      config.tunnelProvisioner?.useExecutable?.(result.result.executable);
+      log(`rest  tunnel install-cloudflared 复用 ${result.result.executable}`);
+      return send(ctx.res, 200, {
+        installed: true, reused: true, executable: result.result.executable,
+        version: result.version, downloadUrl: result.downloadUrl, status: tunnelSnapshot(),
+      }, DESKTOP_CORS);
+    }
+    log(`rest  tunnel install-cloudflared 启动任务 ${result.jobId}`);
     return send(ctx.res, 200, { ...result, status: tunnelSnapshot() }, DESKTOP_CORS);
+  });
+
+  /** 安装任务进度：面板每 1.2 秒轮询；idle 表示本机没有进行中的任务。 */
+  route('GET', /^\/mobile\/v1\/tunnel\/install-cloudflared$/, async (ctx) => {
+    loopbackOnly(ctx, '查询安装进度只允许在主机本机操作');
+    return send(ctx.res, 200, { ok: true, ...installStatus(), status: tunnelSnapshot() }, DESKTOP_CORS);
+  });
+
+  /** 中途取消：给「下载太慢，我改手动装」一个真正可点的出口。 */
+  route('POST', /^\/mobile\/v1\/tunnel\/install-cloudflared\/cancel$/, async (ctx) => {
+    loopbackOnly(ctx, '取消安装只允许在主机本机操作');
+    const outcome = cancelInstall();
+    log(`rest  tunnel install-cloudflared cancel=${outcome.canceled}`);
+    return send(ctx.res, 200, { ok: true, ...outcome }, DESKTOP_CORS);
   });
 
   /**

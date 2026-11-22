@@ -91,8 +91,40 @@ export function sniffBinary(buf, platform = process.platform) {
 }
 
 /**
+ * 只查不装：组件目录里是否已有**可用**的二进制。
+ *
+ * 抽出来给安装任务启动时判断「无需下载」用——以前这段逻辑埋在 ensureCloudflared 内部，
+ * 端点要么同步跑完整下载才能知道，要么另写一套判定，两边一旦漂移就会出现
+ * 「面板说没装、网关却在复用」的鬼故事。
+ */
+export function findInstalledCloudflared({
+  version = CLOUDFLARED_RELEASE,
+  destDir,
+  platform = process.platform,
+  arch = process.arch,
+} = {}) {
+  const asset = resolveAsset({ platform, arch });
+  if (!asset) return null;
+  const dir = destDir || componentBinDir({ version });
+  const target = path.join(dir, asset.bin);
+  if (!existsSync(target)) return null;
+
+  // 大小吻合 + 魔数正确才复用（只看大小会把「上次写坏的 .tgz」当成装好了）
+  const actual = statSync(target).size;
+  if (asset.size > 0 && actual !== asset.size) return null;
+  try {
+    if (sniffBinary(readHead(target), platform) === 'unknown') return null;
+  } catch {
+    return null;
+  }
+  return { installed: true, executable: target, version, reused: true, size: actual };
+}
+
+/**
  * 确保 cloudflared 二进制存在于组件目录。返回 { installed, executable, version, reused }。
  * fetchImpl 注入便于测试；默认用全局 fetch。
+ * onProgress({ loaded, total, percent }) 按 chunk 回传**真实下载字节数**，
+ * 让面板能显示进度而不是「已等待 N 秒」的假进度。
  */
 export async function ensureCloudflared({
   version = CLOUDFLARED_RELEASE,
@@ -101,6 +133,7 @@ export async function ensureCloudflared({
   arch = process.arch,
   fetchImpl = globalThis.fetch,
   signal,
+  onProgress,
 } = {}) {
   const asset = resolveAsset({ platform, arch });
   if (!asset) {
@@ -112,24 +145,11 @@ export async function ensureCloudflared({
   const target = path.join(dir, asset.bin);
   const expected = asset.size;
 
-  // 幂等：已存在且大小吻合、且魔数正确才复用（只看大小会把「上次写坏的 .tgz」当成装好了）
-  if (existsSync(target)) {
-    const actual = statSync(target).size;
-    const okSize = expected === 0 || actual === expected;
-    let okMagic = true;
-    if (okSize) {
-      try {
-        okMagic = sniffBinary(readHead(target), platform) !== 'unknown';
-      } catch {
-        okMagic = false;
-      }
-    }
-    if (okSize && okMagic) {
-      return { installed: true, executable: target, version, reused: true };
-    }
-    // 残缺或格式不对：删掉重下（旧版把 .tgz 当二进制写坏的机器靠这一步自愈）
-    try { unlinkSync(target); } catch { /* 落到下面覆盖写 */ }
+  // 残缺或格式不对：删掉重下（旧版把 .tgz 当二进制写坏的机器靠这一步自愈）
+  if (findInstalledCloudflared({ version, destDir: dir, platform, arch })) {
+    return { installed: true, executable: target, version, reused: true, size: statSync(target).size };
   }
+  try { unlinkSync(target); } catch { /* 落到下面覆盖写 */ }
 
   if (typeof fetchImpl !== 'function') {
     const err = new Error('当前运行时不支持下载，请手动安装 cloudflared');
@@ -143,8 +163,11 @@ export async function ensureCloudflared({
   try {
     res = await fetchImpl(asset.url, { signal });
   } catch (err) {
-    const e = new Error(`下载 cloudflared 失败：${err?.message || err}`);
-    e.code = 'DOWNLOAD_FAILED';
+    const aborted = signal?.aborted || err?.name === 'AbortError';
+    const e = new Error(aborted
+      ? '下载 cloudflared 已取消'
+      : `下载 cloudflared 失败：${err?.message || err}`);
+    e.code = aborted ? 'DOWNLOAD_CANCELLED' : 'DOWNLOAD_FAILED';
     throw e;
   }
   if (!res.ok) {
@@ -155,10 +178,34 @@ export async function ensureCloudflared({
 
   let raw;
   try {
-    raw = Buffer.from(await res.arrayBuffer());
+    // 流式读取：53MB 的 Windows 包在慢网络下要十几分钟，arrayBuffer() 全程静默，
+    // 用户看到的就是「点了没反应」。按 chunk 累计并回传真实字节数，面板才有进度可显示。
+    if (typeof res.body?.getReader === 'function') {
+      const reader = res.body.getReader();
+      const chunks = [];
+      let loaded = 0;
+      const headerTotal = Number(res.headers?.get?.('content-length'));
+      const total = Number.isFinite(headerTotal) && headerTotal > 0 ? headerTotal : expected;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = Buffer.from(value);
+        chunks.push(chunk);
+        loaded += chunk.length;
+        onProgress?.({ loaded, total, percent: total > 0 ? Math.min(100, Math.round(loaded * 100 / total)) : null });
+      }
+      raw = Buffer.concat(chunks);
+    } else {
+      // 注入式 mock fetch（测试）与非标准运行时可能没有 stream：保留原路径。
+      raw = Buffer.from(await res.arrayBuffer());
+      onProgress?.({ loaded: raw.length, total: expected, percent: 100 });
+    }
   } catch (err) {
-    const e = new Error(`读取 cloudflared 内容失败：${err?.message || err}`);
-    e.code = 'DOWNLOAD_FAILED';
+    const aborted = signal?.aborted || err?.name === 'AbortError';
+    const e = new Error(aborted
+      ? '下载 cloudflared 已取消'
+      : `读取 cloudflared 内容失败：${err?.message || err}`);
+    e.code = aborted ? 'DOWNLOAD_CANCELLED' : 'DOWNLOAD_FAILED';
     throw e;
   }
   if (raw.length === 0 || (expected > 0 && raw.length !== expected)) {

@@ -274,7 +274,9 @@ bash spike0/run-demo.sh            # 自动起服务 → 造 3 帧 → 跑客户
 | `POST /mobile/v1/tunnel/login` | 发起 Cloudflare 浏览器授权（起 `cloudflared tunnel login`，返回授权链接），幂等 |
 | `GET /mobile/v1/tunnel/login` | 授权进度：`idle/waiting/ok/error/canceled` + 链接 + 失败原因 |
 | `POST /mobile/v1/tunnel/login/cancel` | 取消等待中的授权并回收子进程 |
-| `POST /mobile/v1/tunnel/install-cloudflared` | 用户同意后从官方源自举安装 cloudflared 到私有目录 |
+| `POST /mobile/v1/tunnel/install-cloudflared` | 用户同意后**启动**自举安装任务（立刻返回 `jobId/downloadUrl`），已装则直接 `reused` |
+| `GET /mobile/v1/tunnel/install-cloudflared` | 安装进度：`idle/running/done/failed/canceled` + 真实已下载字节 + 百分比 |
+| `POST /mobile/v1/tunnel/install-cloudflared/cancel` | 取消下载任务，面板转「已取消安装」并给手动安装指引 |
 | `GET /mobile/v1/diag/bundle` | 脱敏诊断包，含可直接粘贴的 `text` 字段 |
 
 三条硬约束：
@@ -396,7 +398,29 @@ mock 的 `pendingTodos` 曾经是 `{ question, options:[{id,label}], createdAt }
 `test/timeline-attachments.mjs` 逐字段锁住 required / enum。原则：**mock 只能给契约里
 有的字段，且形状必须与 schema 一致**——否则「看起来像没数据」的假故障会反复出现。
 
-## 12. 下一步
+## 12. cloudflared 自举安装：真实进度与自救出口（0.3.0）
+
+新机器装插件后点「确认下载并安装」曾有「毫无反应」的现场反馈。根因不是按钮没绑事件，
+而是国内直连 GitHub Release 只有 ~73 KB/s（Windows 包 53MB ≈ 12 分钟），
+旧实现同步 `arrayBuffer()` 全程静默、面板 240 秒超时后错误又被吞掉。
+
+0.3.0 的处理（见 `docs/setup/cloudflared_安装无反应_问题评估与方案.md`）：
+
+- **不内嵌二进制**：用户下载的 `cloudflared-master.zip` 是 880KB 的 **Go 源码**，
+  不是可执行文件；编译产物仍是 Windows 52.9MB / macOS 19–21MB，
+  内嵌会让 npm 包从 350KB 膨胀 50–150 倍。保持按需下载到私有目录。
+- **启动即返回**：`POST /tunnel/install-cloudflared` 只启动单例任务；
+  `GET` 轮询真实字节进度（`loaded/total/percent`），面板在**同一个弹窗**里更新进度条。
+- **慢而不断不算超时**：90 秒无新字节或 20 分钟总时长才算失败；
+  失败文案明确说明「国内访问 GitHub 较慢」并给浏览器下载地址。
+- **永远有出口**：确认弹窗、进行中弹窗、失败/取消弹窗都带官方下载地址；
+  进行中可点「取消并改手动安装」，失败弹窗给手动放置路径三步指引。
+- **不放松校验**：仍是官方源 + 官方字节数 + PE/Mach-O/ELF 魔数，取消/失败会清残留。
+
+回归：`test/install-progress.mjs`（状态机/进度/取消/超时/单例 + 真实路由）、
+`test/install-continue.mjs`（面板五条链路：进度、失败、慢下载、取消、复用）。
+
+## 13. 下一步
 
 1. **X2 真宿主实跑**：desktop profile 的 `cordis.patch.yml` 打开 `host: mux` 重启，对照 diag 服务可见性。
 2. 真机安装 cloudflared 后（macOS `brew install cloudflared`；Windows 下载 `cloudflared.exe`
