@@ -206,7 +206,12 @@ class BaseProvisioner {
     if (!Number.isInteger(port) || port <= 0) throw fail(4400, '开通隧道需要有效端口');
 
     const cached = this.state;
-    if (!force && cached && cached.port === port) {
+    // hosted 形态的旧版状态文件只有 hostname/tunnelId/credentialsFile，没有 token
+    // （0.3.3 之前的 local 形态落的状态）。短路必须要求 token 在手，否则起不了
+    // cloudflared 还报「token 缺失」——这种状态要走一次重新开通（子域回传，地址不漂移）。
+    const shortCircuit = cached && cached.port === port
+      && (this.kind !== 'hosted' || cached.token);
+    if (!force && shortCircuit) {
       // 已确认可解析就不再查；否则现场验一次，避免把「未生效」固化在状态里
       if (cached.dnsOk !== true) await this.verifyDns(cached.hostname);
       const s = this.state;

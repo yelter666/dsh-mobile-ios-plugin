@@ -112,11 +112,19 @@ export function createEnrollHandler(env, { fetchImpl = globalThis.fetch } = {}) 
       `/accounts/${accountId}/cfd_tunnel?name=${encodeURIComponent(name)}&is_deleted=false`);
     const hit = (Array.isArray(list) ? list : []).find((t) => t && t.name === name
       && (!t.deleted_at || String(t.deleted_at).startsWith(LOCAL_MANAGED_DELETED_AT)));
-    if (hit) {
-      if (hit.remote_config === false) {
-        throw { status: 409, message: `已存在同名本地管理隧道 ${name}：请换一个开通前缀（PREFIX）` };
-      }
+    if (hit && hit.remote_config !== false) {
       return { accountId, id: hit.id, created: false };
+    }
+    if (hit) {
+      // 0.3.3 之前 local 形态开通的同名隧道（本地管理、credentialsFile 形态）。
+      // 主机升级到 hosted 后拿不到 token，自动迁移：删旧建新（同名，DNS 随后重指）。
+      // 有活跃连接时删除会被 Cloudflare 拒绝 → 409 让用户先停掉本机 cloudflared。
+      try {
+        await cfApi(fetchImpl, env.CF_API_TOKEN, 'DELETE',
+          `/accounts/${accountId}/cfd_tunnel/${hit.id}`);
+      } catch (err) {
+        throw { status: 409, message: `已存在同名本地管理隧道 ${name}，自动迁移失败（隧道可能有活跃连接）：请停止本机 cloudflared 后重试（${err?.message || ''}）` };
+      }
     }
     const created = await cfApi(fetchImpl, env.CF_API_TOKEN, 'POST', `/accounts/${accountId}/cfd_tunnel`, {
       name,

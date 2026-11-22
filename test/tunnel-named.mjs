@@ -292,6 +292,44 @@ try {
   }
 
   {
+    // 0.3.3 之前 local 形态落的状态文件没有 token 字段；升级到 hosted 后
+    // ensure() 不得拿这种状态短路，必须重新开通一次（子域回传，地址不漂移）。
+    const stateFile = tmpState('hosted-legacy');
+    fs.writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      subdomain: 'dsh-1f7361d2da',
+      hostname: 'dsh-1f7361d2da.matrixboard.cn',
+      tunnelId: 'tun_old_local',
+      credentialsFile: '/Users/x/.cloudflared/tun_old_local.json',
+      port: 3081,
+    }));
+    const calls = [];
+    const fetchImpl = async (url, init) => {
+      calls.push({ url, body: JSON.parse(init.body) });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          hostname: 'dsh-1f7361d2da.matrixboard.cn',
+          tunnelId: 'tun_migrated',
+          token: TOKEN,
+        }),
+      };
+    };
+    const p = new HostedProvisioner({
+      endpoint: 'https://probe.example.com', enrollToken: 'enroll-1', hostId: 'host_cordis',
+      stateFile, fetchImpl,
+      probe: async () => ({ ok: true, kind: 'CNAME', records: ['tun_migrated.cfargotunnel.com'] }),
+    });
+    const cred = await p.credential({ port: 3081 });
+    check('旧形态状态（无 token）不短路 → 重新开通', calls.length === 1, `calls=${calls.length}`);
+    check('重新开通回传缓存的子域（地址不漂移）', calls[0]?.body?.subdomain === 'dsh-1f7361d2da', calls[0]?.body?.subdomain);
+    check('credential 返回新 token', cred.token === TOKEN && cred.hostname === 'dsh-1f7361d2da.matrixboard.cn');
+    const st = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    check('状态文件补写 token 与新 tunnelId', st.token === TOKEN && st.tunnelId === 'tun_migrated');
+  }
+
+  {
     const p = new HostedProvisioner({
       endpoint: 'https://evil.example.com',
       enrollToken: 'e',

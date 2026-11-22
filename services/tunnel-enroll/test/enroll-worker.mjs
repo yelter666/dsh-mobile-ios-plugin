@@ -42,6 +42,19 @@ function makeCf() {
       tunnels.set(body.name, t);
       return ok(t);
     }
+    if (method === 'DELETE' && path.includes('/cfd_tunnel/')) {
+      const id = path.split('/').pop();
+      for (const [name, t] of tunnels) {
+        if (t.id === id) {
+          if (t.deleteBlocked) {
+            return { status: 200, text: async () => JSON.stringify({ success: false, errors: [{ message: 'tunnel has active connections' }] }) };
+          }
+          tunnels.delete(name);
+          return ok({ id });
+        }
+      }
+      return ok({ id });
+    }
     if (method === 'GET' && path.includes('/token')) return ok('eyJ-tunnel-token');
     if (method === 'PUT' && path.includes('/configurations')) return ok(body.config);
     if (method === 'GET' && path.includes('/dns_records')) {
@@ -143,13 +156,35 @@ async function post(handler, body, token = 'tok-good') {
   check('顺延后 hostname 不变', body.hostname === 'dsh-port00001.matrixboard.cn');
 }
 
-// 6. 本地管理型同名隧道拒绝；CF 报错原样透出
+// 6. 本地管理型同名隧道：自动迁移（删旧建新同名）；删除被拒时 409
 {
   const cf = makeCf();
   cf.tunnels.set('dsh-localll11', { id: 'tid-local', name: 'dsh-localll11', remote_config: false, deleted_at: null });
+  cf.dns.set('dsh-localll11.matrixboard.cn', 'tid-local.cfdargotunnel.com');
   const handler = createEnrollHandler(ENV, { fetchImpl: cf.impl });
   const res = await post(handler, { hostId: 'h', port: 3081, subdomain: 'dsh-localll11' });
-  check('本地管理型隧道返回 409 且带说明', res.status === 409 && (await res.json()).message.includes('本地管理'));
+  const body = await res.json();
+  check('本地管理型隧道自动迁移成功（200 + 新 tunnelId + token）',
+    res.status === 200 && body.tunnelId && body.tunnelId !== 'tid-local' && body.token === 'eyJ-tunnel-token',
+    JSON.stringify(body).slice(0, 80));
+  check('迁移删除了旧隧道（同名槽位已是新 ID）', cf.tunnels.get('dsh-localll11')?.id !== 'tid-local');
+  const del = cf.calls.find((c) => c.method === 'DELETE' && c.path.includes('/cfd_tunnel/tid-local'));
+  check('迁移先 DELETE 旧隧道', Boolean(del));
+  const creates = cf.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/cfd_tunnel'));
+  check('迁移后按 remotely-managed 重建同名隧道',
+    creates.length === 1 && creates[0].body.config_src === 'cloudflare' && creates[0].body.name === 'dsh-localll11');
+  const dns = cf.calls.find((c) => c.method === 'PUT' && c.path.includes('/dns_records/'));
+  check('迁移后 DNS CNAME 重指到新隧道',
+    Boolean(dns) && dns.body.content === `${body.tunnelId}.cfdargotunnel.com`);
+}
+{
+  const cf = makeCf();
+  cf.tunnels.set('dsh-blockdd11', { id: 'tid-blocked', name: 'dsh-blockdd11', remote_config: false, deleted_at: null, deleteBlocked: true });
+  const handler = createEnrollHandler(ENV, { fetchImpl: cf.impl });
+  const res = await post(handler, { hostId: 'h', port: 3081, subdomain: 'dsh-blockdd11' });
+  const body = await res.json();
+  check('迁移失败（活跃连接）返回 409 且带说明', res.status === 409
+    && body.message.includes('本地管理') && body.message.includes('迁移失败'), body.message.slice(0, 80));
 }
 
 // 7. 首次开通（subdomain 为 null）：服务端随机生成、前缀正确
