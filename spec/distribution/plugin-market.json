@@ -25,9 +25,9 @@
       "title": "DSH iOS移动伴侣",
       "description": "iPhone 侧移动伴侣网关：桌面侧栏一键生成配对码，手机扫码后可查看/续跑会话、处理待办与成果物。局域网（同一 Wi-Fi）与远程固定域名（Cloudflare Tunnel，一机一址）两种连接方式并存；管理面仅限主机本机，业务面走设备凭证。",
       "author": "yelter666",
-      "homepage": "https://github.com/yelter666/dsh-mobile-ios",
+      "homepage": "https://github.com/yelter666/dsh-mobile-ios-plugin",
       "repository": {
-        "url": "https://github.com/yelter666/dsh-mobile-ios"
+        "url": "https://github.com/yelter666/dsh-mobile-ios-plugin"
       },
       "metadata": {
         "labels": [
@@ -40,7 +40,7 @@
           "publishTimestamp": 0,
           "source": {
             "type": "git",
-            "url": "https://github.com/yelter666/dsh-mobile-ios",
+            "url": "https://github.com/yelter666/dsh-mobile-ios-plugin",
             "commit": "<占位-完整40位commit>"
           }
         }

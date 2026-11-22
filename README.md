@@ -22,7 +22,7 @@ DSH Mobile iOS 是 DSH Moblie 项目的桌面端插件与 iOS移动伴侣 App �
 「📱 iOS移动伴侣」入口，点开即可生成配对码，iPhone App 扫码连接。
 
 > 本包已发布至 npm：`https://www.npmjs.com/package/dsh-mobile-ios`。
-> 也可粘贴仓库地址 `https://github.com/yelter666/dsh-mobile-ios` 或本地目录路径安装。
+> 也可粘贴仓库地址 `https://github.com/yelter666/dsh-mobile-ios-plugin` 或本地目录路径安装。
 
 ### 更新
 
