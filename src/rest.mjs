@@ -12,6 +12,7 @@ import { selfUpdatePlugin } from './plugin-update.mjs';
 import { resolveNs } from './dns-probe.mjs';
 import { createLoginManager } from './cloudflared-login.mjs';
 import { findCloudflared } from './tunnel.mjs';
+import { copyToSystemClipboard } from './clipboard.mjs';
 
 // QR 编码（vendor：qrcode-generator 1.4.4，MIT，零依赖；见 lib/vendor/，
 // .cjs 后缀：包为 type:module，require 需显式 CommonJS）
@@ -109,6 +110,8 @@ const DESKTOP_CORS_PATHS = [
   /^\/mobile\/v1\/tunnel\/reset$/,
   /^\/mobile\/v1\/tunnel\/login$/,
   /^\/mobile\/v1\/tunnel\/login\/cancel$/,
+  /^\/mobile\/v1\/tunnel\/rebuild-provisioner$/,
+  /^\/mobile\/v1\/clipboard$/,
   /^\/mobile\/v1\/plugin\/self-update$/,
 ];
 
@@ -691,7 +694,18 @@ export function createRestRouter({ core, pairing, host, tickets, config = {}, lo
   /** 查询授权进度（面板每 1.5 秒轮询一次；状态机在 cloudflared-login.mjs）。 */
   route('GET', /^\/mobile\/v1\/tunnel\/login$/, async (ctx) => {
     loopbackOnly(ctx, 'Cloudflare 授权状态只允许在主机本机读取');
-    return send(ctx.res, 200, loginManager.status(), DESKTOP_CORS);
+    const status = loginManager.status();
+    // 授权成功（cert.pem 落地）即运行时重判开通器：全新机器启动时没有凭据，
+    // provisioner 是 null（Quick Tunnel）；不在这里重建的话，授权完成也永远
+    // 分不出 matrixboard.cn 固定地址。mode 仍是 quick 才需要重建，天然幂等。
+    if (status.state === 'ok' && config.tunnel.mode === 'quick') {
+      try {
+        await config.rebuildTunnelProvisioner?.();
+      } catch (err) {
+        log(`rest  tunnel login 后重建开通器失败 ${err?.message || err}`);
+      }
+    }
+    return send(ctx.res, 200, { ...status, provisionerKind: config.tunnelProvisioner?.kind ?? null }, DESKTOP_CORS);
   });
 
   /** 取消授权：kill 掉等待中的 cloudflared，避免用户关了弹窗它还在后台等。 */
@@ -700,6 +714,43 @@ export function createRestRouter({ core, pairing, host, tickets, config = {}, lo
     const status = loginManager.cancel();
     log(`rest  tunnel login cancel → ${status.state}`);
     return send(ctx.res, 200, status, DESKTOP_CORS);
+  });
+
+  /** 手动重判固定地址开通器（面板「重新检测」可调；登录成功路径也会自动调）。 */
+  route('POST', /^\/mobile\/v1\/tunnel\/rebuild-provisioner$/, async (ctx) => {
+    loopbackOnly(ctx, '固定地址重判只允许在主机本机操作');
+    if (typeof config.rebuildTunnelProvisioner !== 'function') {
+      throw fail(4021, '当前形态不支持运行时重判固定地址', { method: 'tunnel.rebuildProvisioner' });
+    }
+    const result = await config.rebuildTunnelProvisioner();
+    return send(ctx.res, 200, { ...result, status: tunnelSnapshot() }, DESKTOP_CORS);
+  });
+
+  /**
+   * 写宿主本机系统剪贴板（pbcopy/clip/wl-copy/xclip）。
+   *
+   * 存在的理由：dsh-app:// 页面里浏览器剪贴板 API 不可靠（writeText 可能永不 settle、
+   * execCommand 对屏幕外元素拿不到选区），「复制包名/安装指令点了没反应」折腾多轮的教训。
+   * 网关跑在宿主本机，用系统自带工具写剪贴板是最可靠的一级；面板失败才走 JS 降级。
+   * 回环-only：远程设备不允许写电脑剪贴板。
+   */
+  route('POST', /^\/mobile\/v1\/clipboard$/, async (ctx) => {
+    loopbackOnly(ctx, '写剪贴板只允许在主机本机操作');
+    const body = await readJson(ctx.req);
+    if (typeof body?.text !== 'string' || !body.text) {
+      throw fail(4400, 'text 不能为空', { method: 'clipboard.write' });
+    }
+    if (body.text.length > 256 * 1024) {
+      throw fail(4400, '剪贴板内容过大', { method: 'clipboard.write' });
+    }
+    let result;
+    try {
+      result = await (config.clipboardImpl || copyToSystemClipboard)(body.text);
+    } catch (err) {
+      log(`rest  clipboard 写入失败 ${err?.code || ''} ${err?.message || err}`);
+      throw fail(4500, err?.message || '系统剪贴板不可用', { code: err?.code || 'CLIPBOARD_FAILED' });
+    }
+    return send(ctx.res, 200, result, DESKTOP_CORS);
   });
 
   /**

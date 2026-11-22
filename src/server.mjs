@@ -80,7 +80,12 @@ export async function createGateway({
   tunnelAutoRestart = false,
   // Pro 固定地址开通器（见 cloudflare.mjs）。**提供即切到 named 模式**：
   // 有稳定子域就不该再退化成随机域名。为 null 时保持 Quick Tunnel 行为不变。
+  // rebuildProvisioner：运行时重建工厂（入口注入，内部重跑 resolveProvisioner）。
+  // 为什么必须有：开通器在启动时一次性判定，而 cert.pem 是**之后**经浏览器授权
+  // 才出现的——「全新机器 → 登录授权 → 分配固定地址」这条链必须能在运行时重判，
+  // 否则装好 cloudflared、授权完成也永远只能 Quick Tunnel（真机实测踩坑）。
   tunnelProvisioner = null,
+  rebuildProvisioner = null,
   tunnelPidFile = null,
   // 隧道子进程的 spawn 实现。默认用 node:child_process；测试注入假进程，
   // 嵌入式场景也可替换（TunnelManager 本身已支持，这里只是让网关能透传）。
@@ -88,6 +93,8 @@ export async function createGateway({
   // 面板「重新授权」用的 cloudflared 与会话（测试注入；生产走发现链 + 真子进程）
   loginExecutable = null,
   loginManager = null,
+  // 系统剪贴板写入实现（测试注入；生产用 pbcopy/clip 真跑）
+  clipboardImpl = null,
 } = {}) {
   if (!host) throw new Error('createGateway 需要 host 适配器');
 
@@ -145,6 +152,21 @@ export async function createGateway({
     },
   });
 
+  // 开通器是可变的：登录授权拿到 cert.pem 后由 rebuildTunnelProvisioner 重判。
+  // config.tunnelProvisioner 用 getter——rest 层每次读取都拿最新值，不存在旧引用。
+  let provisioner = tunnelProvisioner;
+  const applyProvisioner = (next) => {
+    provisioner = next || null;
+    config.tunnel.mode = provisioner ? 'named' : 'quick';
+    config.tunnel.resolveNamedTarget = provisioner
+      ? () => provisioner.credential({ port: config.tunnel.port })
+      : null;
+    activeSuffixes = provisioner?.baseDomain ? [...baseSuffixes, provisioner.baseDomain] : [...baseSuffixes];
+    hostAllow = makeHostAllow(activeSuffixes);
+    log(`tunnel 开通器重判 → ${provisioner ? provisioner.kind : 'quick（无固定地址凭据）'}`);
+    return { provisionerKind: provisioner?.kind ?? null, mode: config.tunnel.mode };
+  };
+
   const config = {
     dev,
     addrs,
@@ -152,18 +174,31 @@ export async function createGateway({
     wsStats: () => ws.stats(),
     dropAll: () => ws.dropAll?.() ?? 0,
     tunnel,
-    tunnelProvisioner,
+    get tunnelProvisioner() { return provisioner; },
     hostView,
     ...(loginExecutable ? { loginExecutable } : {}),
     ...(loginManager ? { loginManager } : {}),
+    ...(clipboardImpl ? { clipboardImpl } : {}),
     // 手机端要填的「电脑地址」（LAN IP:port）；未起或无私网地址时为 null
     lanAddr: () => (listening?.lan ?? null),
+    /** 运行时重判开通器。隧道在跑时先停（旧 ingress 不能挂着），失败则回滚不重建。 */
+    rebuildTunnelProvisioner: async () => {
+      if (typeof rebuildProvisioner !== 'function') return null;
+      const wasRunning = tunnel.state === 'running' || tunnel.state === 'starting';
+      if (wasRunning) {
+        try { await tunnel.stop(); } catch (err) {
+          log(`tunnel 重建前停止失败（继续重判）${err?.message || err}`);
+        }
+      }
+      return applyProvisioner(rebuildProvisioner());
+    },
   };
   const handler = createRestRouter({ core, pairing, host: hostView, tickets, config, log });
   // 固定地址是自有域名：隧道进来的 Host 是 dsh-xxxx.matrixboard.cn，
   // 不把 zone 加进白名单会在 WS 握手阶段 403（REST 通但实时不通，最难查的一种半通）。
-  const suffixes = tunnelProvisioner?.baseDomain ? [...hostSuffixes, tunnelProvisioner.baseDomain] : hostSuffixes;
-  const hostAllow = makeHostAllow(suffixes);
+  const baseSuffixes = hostSuffixes?.length ? hostSuffixes : ['trycloudflare.com'];
+  let activeSuffixes = tunnelProvisioner?.baseDomain ? [...baseSuffixes, tunnelProvisioner.baseDomain] : [...baseSuffixes];
+  let hostAllow = makeHostAllow(activeSuffixes);
 
   const server = http.createServer((req, res) => {
     handler(req, res).catch((err) => {

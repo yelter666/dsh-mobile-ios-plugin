@@ -111,10 +111,15 @@ function makeHarness({ clipboardFails = false } = {}) {
     AbortController, AbortSignal,
     fetch: async (url, opts) => {
       const method = opts?.method || 'GET';
-      fetchCalls.push({ url, method });
+      fetchCalls.push({ url, method, body: opts?.body });
       if (url.includes('/health')) return { ok: true, json: async () => ({ ok: true }) };
+      if (url.includes('/mobile/v1/clipboard')) {
+        // 复制一级走网关写系统剪贴板；失败场景让所有一级都失败，逼出降级链
+        if (clipboardFails) return { ok: false, status: 500, json: async () => ({ ok: false, error: { message: 'unavailable' } }) };
+        return { ok: true, json: async () => ({ ok: true, tool: 'pbcopy' }) };
+      }
       if (url.includes('/summary')) {
-        return { ok: true, json: async () => ({ ok: true, version: '0.3.1', tunnel: { ...tunnel } }) };
+        return { ok: true, json: async () => ({ ok: true, version: '0.3.2', tunnel: { ...tunnel } }) };
       }
       if (url.includes('tunnel/start')) {
         tunnel.state = 'running';
@@ -161,6 +166,7 @@ function makeHarness({ clipboardFails = false } = {}) {
     actions: () => queryTree(body, '.modal-actions')[0]?.children || [],
     action: (label) => (queryTree(body, '.modal-actions')[0]?.children || []).find((b) => (b._text || '').includes(label)),
     promptEl: () => queryTree(body, '.modal-prompt')[0] || null,
+    copyBtn: () => queryTree(body, '.modal-copy-btn')[0] || null,
   };
 }
 
@@ -198,45 +204,49 @@ console.log('\ncloudflared → Harness Agent 安装指令链路回归\n');
   check('指令含验收标准', text.includes('【验收】'));
 }
 
-// 2. 关键：整条链路不再发起网关下载（这正是「按钮无反应」的根因所在）
+// 2. 关键：整条链路不再发起网关下载；复制走行内按钮 + 系统剪贴板端点
 {
   const h = makeHarness();
   await openInstallPrompt(h);
   h.fetchCalls.length = 0;
-  h.action('复制安装指令')?.click();
-  await sleep(60);
-  check('复制指令不触发 install-cloudflared 下载', !h.fetchCalls.some((c) => c.url.includes('install-cloudflared')));
-  check('复制指令不触发进度轮询端点', !h.fetchCalls.some((c) => c.url.includes('install-cloudflared') && c.method === 'GET'));
+  const btn = h.copyBtn();
+  check('指令框右侧有行内复制按钮', !!btn);
+  check('复制按钮不触发 install-cloudflared 下载', !h.fetchCalls.some((c) => c.url.includes('install-cloudflared')));
+  btn?.click();
+  await sleep(80);
+  check('点击复制走网关系统剪贴板端点', h.fetchCalls.some((c) => c.url.includes('/mobile/v1/clipboard') && c.method === 'POST'));
+  check('复制仍不触发 install-cloudflared 下载', !h.fetchCalls.some((c) => c.url.includes('install-cloudflared')));
+  check('复制成功有可见提示', allTexts(h.body).some((t) => t.includes('已复制到剪贴板')));
+  check('复制后弹窗仍保留指令框', !!h.promptEl());
   h.fetchCalls.length = 0;
   h.action('我装好了，继续')?.click();
   await sleep(60);
   check('未装好时点继续也不触发下载', !h.fetchCalls.some((c) => c.url.includes('install-cloudflared')));
 }
 
-// 3. 复制按钮：拿到完整指令并给出可见成功反馈
+// 3. 复制成功路径：剪贴板端点收到完整指令
 {
   const h = makeHarness();
   await openInstallPrompt(h);
-  h.action('复制安装指令')?.click();
+  h.copyBtn()?.click();
   await sleep(80);
-  check('剪贴板收到完整指令', h.copied.length === 1 && h.copied[0] === h.promptEl()?.value);
-  check('复制成功有可见提示', allTexts(h.body).some((t) => t.includes('已复制') && t.includes('DeepSeek Harness')));
-  check('复制后弹窗仍保留指令框', !!h.promptEl());
+  const clipCall = h.fetchCalls.find((c) => c.url.includes('/mobile/v1/clipboard'));
+  check('剪贴板端点收到完整指令', clipCall?.body?.text === h.promptEl()?.value, JSON.stringify(clipCall?.body).slice(0, 120));
 }
 
-// 4. 复制全线失败：自动补一个已全选的手动输入框，不演「点了没反应」
+// 4. 复制全线失败：明确提示手动复制并补一个已全选的输入框，不演「点了没反应」
 {
   const h = makeHarness({ clipboardFails: true });
   await openInstallPrompt(h);
-  h.action('复制安装指令')?.click();
-  await sleep(100);
-  check('复制失败明确提示手动复制', allTexts(h.body).some((t) => t.includes('请按 Ctrl/⌘+C 手动复制')));
+  h.copyBtn()?.click();
+  await sleep(120);
+  check('复制失败明确提示手动复制', allTexts(h.body).some((t) => t.includes('按 Ctrl/⌘+C 即可')));
   const pick = queryTree(h.body, '.modal-pick')[0];
   check('复制失败补出手动输入框', !!pick);
   check('手动输入框内容是同一段指令', pick?.value === h.promptEl()?.value);
 }
 
-// 5. 装好后点「我装好了，继续」→ 探测到 cloudflared → 继续出码
+// 5. 装好后点「我装好了，继续」→ 先弹固定地址引导（新机器无凭据）→ 可选临时地址出码
 {
   const h = makeHarness();
   await openInstallPrompt(h);
@@ -244,7 +254,16 @@ console.log('\ncloudflared → Harness Agent 安装指令链路回归\n');
   h.fetchCalls.length = 0;
   h.action('我装好了，继续')?.click();
   await sleep(150);
-  check('装好后能继续开启远程（tunnel/start）', h.fetchCalls.some((c) => c.url.includes('tunnel/start') && c.method === 'POST'));
+  check('装好后弹固定地址引导（新机器无凭据）', allTexts(h.body).some((t) => t.includes('分配固定地址')));
+  check('引导弹窗有「登录 Cloudflare」入口', allTexts(h.body).some((t) => t.includes('登录 Cloudflare')));
+  check('引导阶段还没有出码', !h.fetchCalls.some((c) => c.url.includes('tunnel/start')));
+  const skip = h.action('先用临时地址出码');
+  check('保留「先用临时地址出码」出口', !!skip);
+  h.fetchCalls.length = 0;
+  skip?.click();
+  await sleep(150);
+  check('选择临时地址后继续开启远程（tunnel/start）', h.fetchCalls.some((c) => c.url.includes('tunnel/start') && c.method === 'POST'));
+  check('选择临时地址后不再重复引导', !allTexts(h.body).some((t) => t.includes('分配固定地址')));
 }
 
 // 6. 还没装就点继续：原地提示，既不关窗也不假装成功

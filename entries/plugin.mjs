@@ -109,7 +109,9 @@ export function apply(ctx = {}, config = {}) {
     const tunnelStateFile = tunnelCfg.stateFile || defaultTunnelStateFile();
     const cloudflareBin = resolveCloudflared(config);
 
-    const provisioner = resolveProvisioner({
+    // 开通器判定参数收敛成一份：启动判定与运行时重建（登录授权拿到 cert.pem 后）
+    // 必须用同一套输入，否则重建后的结论会和启动时不一致。
+    const provisionerInput = {
       tunnelCfg: {
         ...tunnelCfg,
         // 环境变量兜底：与 sidecar 一致，避免只在某个入口生效
@@ -124,7 +126,8 @@ export function apply(ctx = {}, config = {}) {
       stateFile: tunnelStateFile,
       hostId: 'host_cordis',
       log,
-    });
+    };
+    const provisioner = resolveProvisioner(provisionerInput);
 
     const booting = createGateway({
       host,
@@ -146,6 +149,8 @@ export function apply(ctx = {}, config = {}) {
       // 隧道可执行文件发现链（见 resolveCloudflared）；显式 config.tunnelBin 优先
       tunnelExecutable: cloudflareBin,
       tunnelProvisioner: provisioner,
+      // 登录授权拿到 cert.pem 后运行时重判（全新机器 → 授权 → 固定地址 的关键链路）
+      rebuildProvisioner: () => resolveProvisioner(provisionerInput),
       log,
     })
       .then(async (gw) => {

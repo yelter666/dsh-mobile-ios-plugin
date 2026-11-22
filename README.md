@@ -277,6 +277,8 @@ bash spike0/run-demo.sh            # 自动起服务 → 造 3 帧 → 跑客户
 | `POST /mobile/v1/tunnel/install-cloudflared` | 用户同意后**启动**自举安装任务（立刻返回 `jobId/downloadUrl`），已装则直接 `reused` |
 | `GET /mobile/v1/tunnel/install-cloudflared` | 安装进度：`idle/running/done/failed/canceled` + 真实已下载字节 + 百分比 |
 | `POST /mobile/v1/tunnel/install-cloudflared/cancel` | 取消下载任务，面板转「已取消安装」并给手动安装指引 |
+| `POST /mobile/v1/tunnel/rebuild-provisioner` | 运行时重判固定地址开通器（授权拿到 cert.pem 后；登录成功路径也会自动调） |
+| `POST /mobile/v1/clipboard` | 写宿主本机系统剪贴板（pbcopy/clip/wl-copy/xclip）。面板复制的最可靠一级，回环-only |
 | `GET /mobile/v1/diag/bundle` | 脱敏诊断包，含可直接粘贴的 `text` 字段 |
 
 三条硬约束：
@@ -398,31 +400,43 @@ mock 的 `pendingTodos` 曾经是 `{ question, options:[{id,label}], createdAt }
 `test/timeline-attachments.mjs` 逐字段锁住 required / enum。原则：**mock 只能给契约里
 有的字段，且形状必须与 schema 一致**——否则「看起来像没数据」的假故障会反复出现。
 
-## 12. cloudflared 安装：交给 Harness Agent（0.3.1）
+## 12. cloudflared 安装与复制：系统剪贴板 + 运行时重判（0.3.2）
 
-新机器装插件后点「确认下载并安装」反复有「毫无反应」的现场反馈。0.3.0 曾把下载改成
-真实字节进度 + 单例任务 + 取消/失败出口（见 `docs/setup/cloudflared_安装无反应_问题评估与方案.md`），
-但真机仍不可用：**慢网络 + Electron `dsh-app://` 自定义协议下的剪贴板/下载能力，靠插件自己
-在面板里全部兜住不现实**。0.3.1 改为把「装」这件事整体交出去：
+0.3.1 的「复制指令交给 Harness Agent」在 Windows 实测仍失败，并暴露三个新事实：
 
-- **插件不再自己下载**：缺 cloudflared 时弹窗给一段**可直接复制的指令**，
-  用户粘贴给 DeepSeek Harness 桌面端 Agent，由 Agent 下载、解压、放到私有目录并调试隧道。
-- **复制不能只押在按钮上**：指令框是可见、只读、打开即自动全选的 textarea；
-  `⌘/Ctrl+C` 永远能拿到。复制按钮点击即显示「复制中…」。
-- **剪贴板 API 必须带超时**：`navigator.clipboard.writeText()` 在自定义协议下可能永远
-  pending，直接 `await` 会把点击处理挂死（这正是「复制包名点了没反应」的根因）。
-  `copyToClipboard()` 用 800ms 竞速后降级到**弹窗内可见文本框** → 屏幕外 textarea →
-  contenteditable；全失败才补一个可手选输入框。更新弹窗同样带可见包名框。
-- **服务端能力保留不删**：`POST/GET /tunnel/install-cloudflared` 与其状态机、校验仍可用于
-  其他调用方（如脚本），但面板入口不再依赖它，`summary.canAutoInstall` 也不再是弹窗门槛
-  ——任何平台缺依赖都有「复制指令找 Agent」的出口。
-- **装完能收口**：点「我装好了，继续」→ `probe()` 确认 `executable === 'found'` →
-  继续「确保隧道起来 → 出码」；没装好则原地提示，不关窗、不假成功。
+1. **复制仍不行**：dsh-app:// 页面里 `writeText` 挂起、`execCommand` 拿不到选区之外，
+   剩下的 JS 降级在部分 Windows 宿主里也全军覆没——浏览器剪贴板 API 在这个环境里
+   **没有可靠的一级**。
+2. **弹窗一点就消失**：遮罩上的「点遮罩关闭」依赖 `e.target === mask` 精确判定，
+   宿主事件合成让它误判——弹窗一关，所有异步反馈全没了，这正是「点了没反应」的
+   另一半根因。
+3. **装好 cloudflared 也分不出固定地址**：开通器只在网关启动时判定一次。全新机器
+   启动时无 cert.pem → provisioner=null → 永远 Quick Tunnel；之后授权完成也不会重判，
+   `matrixboard.cn` 固定地址永远分不出来。
 
-回归：`test/install-continue.mjs`（25 断言：指令完整性、六平台地址、自动全选、
-复制成功/失败兜底、**不再触发网关下载**、装好继续/没装不冒进）、
-`test/update-dialog.mjs`（含 `clipboard.writeText` 永久挂起的 800ms 降级断言）、
-`test/install-progress.mjs`（服务端状态机保留）。
+0.3.2 的处理：
+
+- **复制改为网关写系统剪贴板**（新 `src/clipboard.mjs` + `POST /mobile/v1/clipboard`，
+  回环-only）：macOS `pbcopy`、Windows `clip`、Linux `wl-copy`→`xclip` 降级链。
+  网关就在宿主本机，系统工具 100% 可用——这是跨过浏览器剪贴板限制的一级。
+  面板 `copyToClipboard()` 顺序：网关端点 → clipboard API（800ms 竞速）→ 弹窗内可见
+  全选文本框 → 屏幕外 textarea → contenteditable → 可手选输入框。
+- **复制框布局按用户指定**：文本框在左、行内「⧉ 复制」按钮在右（`.modal-copy-row`），
+  点击即反馈（复制中… → ✓ 已复制；失败给 toast + 手动兜底框）。
+- **弹窗不再因点遮罩消失**：移除「点遮罩关闭」，弹窗内点击阻断冒泡；关闭只走 ✕ 与
+  明确按钮。
+- **开通器运行时重判**：`createGateway` 新增 `rebuildProvisioner` 工厂；
+  `GET /tunnel/login` 轮询到授权完成（state=ok 且仍为 quick）**自动重判**，
+  `POST /tunnel/rebuild-provisioner` 供手动触发；重建同步更新 tunnel.mode、
+  resolveNamedTarget 与 WS host 白名单。`config.tunnelProvisioner` 改 getter，无旧引用。
+- **新机器引导链补全**：装好 cloudflared 但无固定地址凭据时，面板先弹
+  「分配固定地址（matrixboard.cn 子域）」引导登录授权；授权成功自动继续开通出码；
+  「先用临时地址出码」保留出口（本次面板生命周期内不再打断）。
+
+回归：`test/clipboard.mjs`（17 断言：命令链/降级/stdin 内容/回环守卫/CORS/注入实现）、
+`test/rebuild-provisioner.mjs`（11 断言：手动重判、授权 ok 自动重判、白名单并入自有域名、
+named 后不重复重建）、`test/install-continue.mjs`（32 断言：行内复制按钮、系统剪贴板
+端点、固定地址引导链）、`test/update-dialog.mjs`（含 writeText 永久挂起降级）。
 
 ## 13. 下一步
 

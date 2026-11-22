@@ -63,6 +63,22 @@ const gw = await createGateway({
   // 找不到时隧道接口返回 4021，不影响网关其余功能。
   tunnelExecutable: args['tunnel-bin'] || 'auto',
   tunnelProvisioner: provisioner,
+  // 登录授权拿到 cert.pem 后运行时重判（与 plugin 入口同一约定）
+  rebuildProvisioner: () => resolveProvisioner({
+    tunnelCfg: {
+      provisioner: args['tunnel-provisioner'] || undefined,
+      apiToken: args['cf-token'] || process.env.DSH_CF_API_TOKEN,
+      accountId: args['cf-account'] || process.env.DSH_CF_ACCOUNT_ID,
+      zoneId: args['cf-zone'] || process.env.DSH_CF_ZONE_ID,
+      baseDomain: args['tunnel-domain'] || process.env.DSH_TUNNEL_BASE_DOMAIN || 'matrixboard.cn',
+      prefix: args['tunnel-prefix'] || 'dsh',
+      endpoint: args['tunnel-endpoint'] || process.env.DSH_TUNNEL_ENDPOINT,
+      enrollToken: args['tunnel-enroll'] || process.env.DSH_TUNNEL_ENROLL_TOKEN,
+      executable: args['tunnel-bin'] || 'cloudflared',
+    },
+    stateFile: tunnelStateFile,
+    log,
+  }),
 });
 const addr = await gw.start();
 
