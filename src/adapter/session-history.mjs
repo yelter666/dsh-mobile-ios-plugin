@@ -10,6 +10,9 @@
 //   · assistant/message 的 content 里同时含 reasoning / text / tool-call，
 //     tool-call 由独立的 tool/call 事件承载，这里跳过避免工具行重复；
 //   · 空 reasoning / 空 text 一律丢弃（实测大量 {"type":"reasoning","text":""}）；
+//   · **附件消息不能丢**：纯图片消息只有 image 块、没有 text。先按 source.kind 过滤，
+//     再看内容，无正文时用占位行（见 mediaPlaceholder）——否则「发了图，聊天记录里
+//     什么都没有」（2026-11-22 真机会话取证：seq=318 只有两张 image 块）；
 //   · seq 原样保留，供客户端排序与去重；客户端不拿它做实时续传判断。
 
 const TEXT_LIMIT = 4000;
@@ -23,6 +26,111 @@ const texts = (content) =>
   Array.isArray(content)
     ? content.filter((p) => p && p.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('')
     : '';
+
+// MARK: 附件块（2026-11-22）
+//
+// 宿主 user/message 的附件块真实形状（真机会话 session-b77cabee seq=318 取证）：
+//   { type: 'image',
+//     attachment: { attachmentId: 'sha256:b1166d…', mediaType: 'image/jpeg',
+//                   width: 1120, height: 1600, bytes: 360968, name: '001' } }
+// 关键事实：**那张纯图片消息没有 text 块**。旧实现先算 text、`if (!text) break`，
+// 于是纯图片消息整条被丢；图文消息只剩文字，用户看到的就是「发了图，聊天记录里
+// 什么都没有」——这不是客户端渲染问题，是时间线翻译层把内容吃掉了。
+const MEDIA_BLOCK_TYPES = new Set(['image', 'file', 'document']);
+
+const bytesText = (n) => {
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+};
+
+/** 单个附件块 → 元数据。取不到 id / mediaType 也返回，至少能说「有一张图」。 */
+function attachmentOf(block) {
+  const a = block?.attachment;
+  if (a && typeof a === 'object') {
+    return {
+      ...(typeof a.attachmentId === 'string' && a.attachmentId ? { attachmentId: a.attachmentId } : {}),
+      ...(typeof a.mediaType === 'string' && a.mediaType ? { mediaType: a.mediaType } : {}),
+      ...(Number.isFinite(a.bytes) ? { bytes: a.bytes } : {}),
+      ...(Number.isFinite(a.width) ? { width: a.width } : {}),
+      ...(Number.isFinite(a.height) ? { height: a.height } : {}),
+      ...(typeof a.name === 'string' && a.name ? { name: a.name } : {}),
+    };
+  }
+  // 内联 base64 形状：{ type:'image', source:{ type:'base64', media_type, data } }。
+  const s = block?.source;
+  if (s && typeof s === 'object' && typeof s.data === 'string' && s.data) {
+    return {
+      ...(typeof s.media_type === 'string' ? { mediaType: s.media_type } : {}),
+      bytes: Math.round((s.data.length * 3) / 4),
+    };
+  }
+  return {};
+}
+
+/**
+ * 一条消息里的附件摘要（**不含字节内容**）。
+ *
+ * 字节留在宿主对象库里，时间线只带 id 与元数据：手机要缩略图时再按 id 拉一次
+ * （`GET /mobile/v1/attachments/:id`）。把 base64 塞进时间线会让一次冷启动
+ * 拉回几十兆 JSON。
+ */
+export function mediaSummaries(content) {
+  if (!Array.isArray(content)) return [];
+  const out = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object' || !MEDIA_BLOCK_TYPES.has(block.type)) continue;
+    const info = attachmentOf(block);
+    out.push({
+      kind: block.type === 'image' ? 'image' : 'file',
+      ...info,
+      ...(info.attachmentId ? { downloadUrl: `/mobile/v1/attachments/${info.attachmentId}` } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * 附件占位行。
+ *
+ * 为什么必须有：手机端当前只渲染 `text`，`attachments` 是给后续版本用的结构化数据。
+ * 没有这一行，纯附件消息就是空气泡、刷新后彻底消失——用户判定「没发出去」。
+ */
+export function mediaPlaceholder(list) {
+  if (!Array.isArray(list) || list.length === 0) return '';
+  const images = list.filter((m) => m.kind === 'image');
+  const files = list.filter((m) => m.kind === 'file');
+  const parts = [];
+  if (images.length === 1) {
+    const one = images[0];
+    const dim = one.width && one.height ? `${one.width}×${one.height}` : '';
+    const size = bytesText(one.bytes);
+    parts.push(`［图片${dim ? ` · ${dim}` : ''}${size ? ` · ${size}` : ''}］`);
+  } else if (images.length > 1) {
+    const total = images.reduce((sum, m) => sum + (m.bytes || 0), 0);
+    parts.push(`［图片 ${images.length} 张${total ? ` · 共 ${bytesText(total)}` : ''}］`);
+  }
+  for (const f of files) {
+    const size = bytesText(f.bytes);
+    parts.push(`［文件${f.name ? ` · ${f.name}` : ''}${size ? ` · ${size}` : ''}］`);
+  }
+  return parts.join(' ');
+}
+
+/**
+ * 正文与占位的拼装规则（**实时与历史必须一致**，否则同一条消息会出现两个气泡）。
+ *
+ * - 有正文：`text` 就是正文，附件只走 `attachments` 字段。
+ *   为什么不把占位行拼在正文后面：手机发完消息会立刻插一条本地回声（正文），
+ *   服务端再回推同一条时靠「文本相等」去重；一拼占位就不再相等，屏幕上会多一条。
+ * - 纯附件：`text` 用占位行。这条路以前是**整条丢掉**（没有文本就被当空消息），
+ *   救回来之后实时和历史都能看到「［图片 2 张］」。
+ */
+function composeUserText(text, placeholder) {
+  if (text) return clip(text, TEXT_LIMIT);
+  return placeholder || '';
+}
 const clip = (s, n) => (typeof s === 'string' && s.length > n ? `${s.slice(0, n)}…` : s);
 const turnIdOf = (data) => (typeof data?.turn === 'number' ? `t${data.turn}` : undefined);
 
@@ -59,12 +167,18 @@ export function translateRecords(records = []) {
         const text = texts(d.content);
         // 只收真人输入：宿主把 system-reminder / 时间戳采样 / checkpoint 摘要
         // 也塞成 user/message（source.kind 分别 different），搬进时间线就是噪声。
-        if (!text || d.source?.kind !== 'user') break;
+        // 注意顺序：**先按 source 过滤，再看内容空不空**——纯图片消息没有 text，
+        // 反过来写就会把它当空消息丢掉。
+        if (d.source?.kind !== 'user') break;
+        const media = mediaSummaries(d.content);
+        const placeholder = mediaPlaceholder(media);
+        if (!text && !placeholder) break;
         push(seq, {
           id: d.id ? `u-${d.id}` : undefined,
           kind: 'user',
           at: time,
-          text: clip(text, TEXT_LIMIT),
+          text: composeUserText(text, placeholder),
+          ...(media.length ? { attachments: media } : {}),
         });
         break;
       }
@@ -175,11 +289,25 @@ export function translateLiveEvent(input) {
 
   switch (e.type) {
     case 'user/message': {
-      const text = texts(d.content);
       // 只推真人输入。系统注入（system-reminder / checkpoint / 时间戳采样）
       // 也是 user/message，推给手机就是满屏噪声。
-      if (!text || d.source?.kind !== 'user') break;
-      out.push({ kind: 'turn', at, data: { type: 'user_message', turnId, text: clip(text, TEXT_LIMIT) } });
+      // 与历史分支同一条规则：先按 source 过滤，纯图片消息（无 text）也要推，
+      // 否则实时看不到、刷新后历史才有——两处口径不一致最容易被当成「丢消息」。
+      if (d.source?.kind !== 'user') break;
+      const text = texts(d.content);
+      const media = mediaSummaries(d.content);
+      const placeholder = mediaPlaceholder(media);
+      if (!text && !placeholder) break;
+      out.push({
+        kind: 'turn',
+        at,
+        data: {
+          type: 'user_message',
+          turnId,
+          text: composeUserText(text, placeholder),
+          ...(media.length ? { attachments: media } : {}),
+        },
+      });
       break;
     }
 

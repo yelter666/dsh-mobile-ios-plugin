@@ -125,6 +125,25 @@ export function mimeOf(name) {
   return MIME[path.extname(name).toLowerCase()] ?? 'application/octet-stream';
 }
 
+/**
+ * 按文件头认类型。
+ *
+ * 宿主附件对象库里文件名是纯 sha256（没有扩展名），`mimeOf` 认不出来；
+ * 而浏览器 / QuickLook 要的是真 MIME 才会内联显示图片。这里只认几种确定
+ * 的魔数，其余如实回 octet-stream——不猜。
+ */
+export function sniffMime(bytes) {
+  const b = bytes;
+  if (!b || typeof b.length !== 'number' || b.length < 4) return 'application/octet-stream';
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image/gif';
+  if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46
+    && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+  if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46) return 'application/pdf';
+  return 'application/octet-stream';
+}
+
 /** `artifactId` = 相对工作目录的路径（base64url）。不带主机路径，不泄露目录结构。 */
 export function encodeArtifactId(cwd, absolutePath) {
   const rel = path.relative(cwd, absolutePath).split(path.sep).join('/');

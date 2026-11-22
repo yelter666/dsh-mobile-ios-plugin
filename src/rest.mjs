@@ -791,6 +791,28 @@ export function createRestRouter({ core, pairing, host, tickets, config = {}, lo
     ctx.res.end(data);
   });
 
+  // 聊天里「我发的那张图」：按宿主附件摘要取字节（2026-11-22）。
+  //
+  // 时间线只带 `attachments[].downloadUrl`，不带 base64——一次冷启动拉几十兆 JSON
+  // 是另一种坏法。这里与产物下载同一条搬运口径：不解 base64、不包信封，
+  // Content-Type 由字节头认出（对象库文件名没有扩展名）。
+  //
+  // 路由先收任意单段 id，再由 host 校验 `sha256:<64hex>`：非法 id 必须得到
+  // 4400（形状不对），而不是 404（接口不存在）——前者能告诉客户端「别再拼这个 url」。
+  // 路径收边在 host 那一层，这里不放行斜杠，杜绝穿越。
+  route('GET', /^\/mobile\/v1\/attachments\/([^/]+)$/, async (ctx) => {
+    auth(ctx.req);
+    const file = await host.readAttachment(decodeURIComponent(ctx.params[0]));
+    const data = file?.data ?? Buffer.alloc(0);
+    ctx.res.writeHead(200, {
+      'Content-Type': file?.mime ?? 'application/octet-stream',
+      'Content-Length': data.length,
+      'Cache-Control': 'private, max-age=3600',
+      'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(file?.name ?? 'attachment')}`,
+    });
+    ctx.res.end(data);
+  });
+
   route('POST', /^\/mobile\/v1\/tasks\/([^/]+)\/messages$/, async (ctx) => {
     auth(ctx.req);
     const body = await readJson(ctx.req);

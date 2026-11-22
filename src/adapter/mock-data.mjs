@@ -42,7 +42,8 @@ export function createMockData({ now = Date.now() } = {}) {
       permission: 'requireApproval',
       budgetMin: 10,
       needsYou: false,
-      pendingTodoCount: 1,
+      // 与下面 detail.pendingTodos 的条数一致（2 条待办）。
+      pendingTodoCount: 2,
       artifactsCount: 2,
       workspaceId: 'ws_mock',
       workspaceName: 'mock 工作区',
@@ -95,15 +96,30 @@ export function createMockData({ now = Date.now() } = {}) {
   const detail = {
     task: { ...taskList[0] },
     budget: { limitMin: 10, usedSec: 132, remainingSec: 468, warnAt: 480 },
+    // 待办形状按 `spec/openapi.yaml` 的 Todo（required: todoId/type/state/prompt）。
+    //
+    // 这里曾经是 `{ todoId, question, options:[{id,label}], createdAt }` —— 一份**契约里
+    // 不存在的形状**。客户端按契约严格解码，第一条待办就把整份 TaskDetail 解崩，
+    // 表现是「这个任务没有输出、产物胶囊整片消失」；排查时还以为是宿主数据坏了
+    // （2026-11-22，另一个会话照着 mock 反推宿主，绕了两轮）。
+    // 教训：mock 是「契约样本的搬运工」，形状只能比契约更少，不能自创。
     pendingTodos: [
       {
         todoId: 'todo_1',
-        question: '重连退避要不要做成可配置？',
-        options: [
-          { id: 'yes', label: '做成配置项' },
-          { id: 'no', label: '先写死 10s' },
-        ],
-        createdAt: at(20),
+        type: 'approval',
+        state: 'pending',
+        prompt: '写入 src/tunnel-reconnect.mjs（新增文件，523 行）',
+        // options 只对 approval 有意义，取值是契约枚举而非自定义 id/label。
+        options: ['allow_once', 'allow_always', 'deny'],
+        // at() 是「往前偏移」，负值=未来；给 10 分钟，避免刚启动就显示已过期。
+        expiresAt: at(-600),
+      },
+      {
+        todoId: 'todo_2',
+        type: 'question',
+        state: 'pending',
+        // question 类型的提问放 prompt；它没有 allow_once/deny 这类审批选项。
+        prompt: '重连退避要不要做成可配置？',
       },
     ],
     artifactsPreview: artifacts.items.map((a) => ({
@@ -123,7 +139,7 @@ export function createMockData({ now = Date.now() } = {}) {
       { delayMs: 220, frame: { kind: 'turn', data: { type: 'tool_call', callId: 'call_mock_1', toolName: 'read_file', argSummary: 'src/tunnel.mjs' } } },
       { delayMs: 160, frame: { kind: 'turn', data: { type: 'tool_result', callId: 'call_mock_1', toolName: 'read_file', summary: '已读取 523 行' } } },
       { delayMs: 200, frame: { kind: 'turn', data: { type: 'assistant_delta', delta: '并把退避与进程回收都收进去。' } } },
-      { delayMs: 180, frame: { kind: 'todo', data: { todoId: 'todo_1', state: 'pending', question: '重连退避要不要做成可配置？' } } },
+      { delayMs: 180, frame: { kind: 'todo', data: { todoId: 'todo_1', type: 'approval', state: 'pending', prompt: '写入 src/tunnel-reconnect.mjs（新增文件，523 行）' } } },
       { delayMs: 140, frame: { kind: 'log', data: { level: 'info', text: '写入 src/tunnel-reconnect.mjs' } } },
       { delayMs: 160, frame: { kind: 'artifact', data: { artifactId: 'art_notes', name: 'tunnel-notes.md', kind: 'file' } } },
       { delayMs: 200, frame: { kind: 'state', data: { status: 'completed', phase: { index: 5, total: 5, label: '已完成' }, elapsedSec: 96, needsYou: false } } },

@@ -5,6 +5,42 @@
 import { fail, newId } from '../protocol.mjs';
 import { createMockData } from './mock-data.mjs';
 
+// 1×1 透明 PNG：mock 不落字节，但「读附件」这条路要让客户端真的拿到一张可解码的图，
+// 否则缩略图那条链路永远验证不了。
+const MOCK_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+/** 契约里的附件摘要（sha256:64hex）。mock 用确定性摘要，同一个名字得到同一个 id。 */
+function mockAttachmentId(name, bytes) {
+  const hex = Buffer.from(`${name}:${bytes}`).toString('hex');
+  return `sha256:${(hex + '0'.repeat(64)).slice(0, 64)}`;
+}
+
+/** 网关上送的附件 → 宿主 user/message 里的 image / file 块（与真宿主同形）。 */
+function attachmentBlocks(attachments) {
+  if (!Array.isArray(attachments)) return [];
+  return attachments
+    .filter((att) => att && typeof att === 'object')
+    .map((att) => {
+      const name = typeof att.name === 'string' && att.name ? att.name : 'attachment';
+      const mediaType = typeof att.mediaType === 'string' ? att.mediaType : undefined;
+      const b64 = typeof att.dataBase64 === 'string' ? att.dataBase64 : '';
+      const bytes = b64 ? Math.round((b64.length * 3) / 4) : 0;
+      return {
+        type: att.kind === 'image' ? 'image' : 'file',
+        attachment: {
+          attachmentId: mockAttachmentId(name, bytes),
+          ...(mediaType ? { mediaType } : {}),
+          bytes,
+          ...(att.kind === 'image' ? { width: 1120, height: 1600 } : {}),
+          name,
+        },
+      };
+    });
+}
+
 export function createMockHost({ log = () => {}, autoPlay = false, speed = 1, data = null } = {}) {
   const fixtures = data || createMockData();
   const hostInfo = fixtures.hostInfo;
@@ -39,13 +75,14 @@ export function createMockHost({ log = () => {}, autoPlay = false, speed = 1, da
     {
       id: 'deepseek', name: 'DeepSeek',
       models: [
-        { id: 'deepseek-chat', name: 'DeepSeek Chat' },
-        { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', defaultEffort: 'medium' },
+        // 一个声明图片、一个不声明：手机端能在选图前提示的两种分支都要有样本。
+        { id: 'deepseek-chat', name: 'DeepSeek Chat', inputModalities: ['text', 'image'] },
+        { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', defaultEffort: 'medium', inputModalities: ['text'] },
       ],
     },
     {
       id: 'openai', name: 'OpenAI',
-      models: [{ id: 'gpt-5.2', name: 'GPT-5.2', defaultEffort: 'high' }],
+      models: [{ id: 'gpt-5.2', name: 'GPT-5.2', defaultEffort: 'high', inputModalities: ['text', 'image'] }],
     },
   ];
   const modelOf = (taskId) => sessionModels.get(taskId) ?? { provider: 'deepseek', model: 'deepseek-chat' };
@@ -92,8 +129,13 @@ export function createMockHost({ log = () => {}, autoPlay = false, speed = 1, da
     ingestExternal(taskId, kind, data, at) {
       if (kind !== 'turn' || !data || typeof data !== 'object') return;
       if (data.type === 'user_message') {
+        // 附件块与真宿主同形（{type:'image', attachment:{…}}）：时间线翻译层靠它
+        // 把「纯图片消息」救回来，mock 若只记 text，这条路径就永远测不到。
         record(taskId, 'user/message', {
-          content: [{ type: 'text', text: String(data.text ?? '') }],
+          content: [
+            ...(String(data.text ?? '') ? [{ type: 'text', text: String(data.text ?? '') }] : []),
+            ...attachmentBlocks(data.attachments),
+          ],
           source: { kind: 'user' },
         }, at);
       } else if (data.type === 'thought_delta') {
@@ -175,6 +217,16 @@ export function createMockHost({ log = () => {}, autoPlay = false, speed = 1, da
       };
     },
 
+    /**
+     * mock 附件读取：mock 不落字节，但必须回一张能真解码的图——否则「聊天里
+     * 显示的图片」这条链路在 mock 上永远验证不了。只校验 id 形状，宽松返回固定 PNG。
+     */
+    async readAttachment(attachmentId) {
+      const id = String(attachmentId ?? '');
+      if (!/^sha256:[0-9a-f]{64}$/.test(id)) throw fail(4400, 'attachmentId 必须是 sha256:<64 位小写十六进制>');
+      return { name: 'attachment-mock.png', mime: 'image/png', sizeBytes: MOCK_PNG.length, data: MOCK_PNG };
+    },
+
     async createTask({ prompt, title, permission, budgetMin = 10, attachments, provider, model, workspaceId } = {}) {
       const taskId = newId('tsk');
       // 新建会话指定模型（2026-11-21）：与真宿主同口径，请求了就记进会话并在回执里回显。
@@ -218,6 +270,14 @@ export function createMockHost({ log = () => {}, autoPlay = false, speed = 1, da
         ws.sessionIds.unshift(taskId);
       }
       emit(taskId, 'state', { status: 'running', phase: { index: 1, total: 5, label: '已接收' }, elapsedSec: 0, needsYou: false });
+      // 首条提示也要进历史：真宿主会把 user/message 写进会话事件；mock 不落的话
+      // 「新建会话打开后看不到自己刚写的那句」，看起来像消息丢了。
+      emit(taskId, 'turn', {
+        turnId: newId('turn'),
+        type: 'user_message',
+        text: String(prompt ?? ''),
+        ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}),
+      });
       log(`host  createTask ${taskId}`);
       return { ...createOk, taskId, storedKey: tasks.get(taskId).storedKey, acceptedAt: new Date().toISOString(),
         // 与真宿主同形：请求了权限 / 模型才带这些字段。
@@ -229,6 +289,14 @@ export function createMockHost({ log = () => {}, autoPlay = false, speed = 1, da
       const turnId = newId('turn');
       // 纯附件消息 text 可空；mock 只记元数据（不落字节），供端到端断言送达。
       const atts = Array.isArray(attachments) ? attachments : [];
+      // 先把「用户说了什么」写进历史（含附件块），再回一句助手话术。
+      // 顺序不能反：事件是时间线的事实，助手回复只是 mock 的回执。
+      emit(taskId, 'turn', {
+        turnId,
+        type: 'user_message',
+        text: String(text ?? ''),
+        ...(atts.length ? { attachments: atts } : {}),
+      });
       const names = atts.map((a) => a?.name || a?.kind || 'attachment').join('、');
       const delta = text
         ? `收到：${String(text).slice(0, 40)}`

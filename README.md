@@ -364,7 +364,39 @@ bash spike0/run-demo.sh            # 自动起服务 → 造 3 帧 → 跑客户
 宿主 `attachSession` 会比对会话 header 的 `cwd` 与 `workspace.path`（`realpath` 规范化后
 必须严格相等），所以网关必须先用工作区路径建会话、再 attach——顺序反了会抛错。
 
-## 11. 下一步
+## 11. 时间线附件与 mock 形状（0.2.22）
+
+### 11.1 图片消息不该在时间线里消失
+
+真机会话 `session-b77cabee` 的 seq=318 取证：用户发的纯图片消息**只有两张 image 块、
+没有 text 块**。旧的 `session-history.mjs` 先算 text、`if (!text) break`，把整条丢掉——
+手机表现为「发了图，聊天记录里什么都没有」，刷新后也看不到。
+
+现在的规则（`translateRecords` 与 `translateLiveEvent` 同口径）：
+
+- 先按 `source.kind === 'user'` 过滤（系统注入 / ptc-mode 的截图仍丢弃）；
+- 有正文：文本保持正文原样，附件放 `attachments[]`——手机本地回声靠「文本相等」
+  去重，正文后面拼占位行会让同一条消息出现两个气泡；
+- 纯附件：`text` 用占位行（如 `［图片 2 张 · 共 735 KB］`、`［文件 · 报价.pdf］`），
+  这样即时帧和冷启动历史都能看到消息存在；
+- 时间线只带摘要，不带图片字节。缩略图走 `GET /mobile/v1/attachments/sha256:<64hex>`
+  （文件头识别 MIME、inline 直接预览；只接受 sha256，路径收边杜绝穿越）。
+
+模型目录（`appSettings` / `sessionSettings`）现在透传 `inputModalities`：手机能在选图前
+提示「这个模型不接受图片」，而不是等宿主在 prompt 准入处拒了才发现。
+
+### 11.2 mock 是契约样本，不能自创形状
+
+mock 的 `pendingTodos` 曾经是 `{ question, options:[{id,label}], createdAt }`——契约
+`Todo` 里根本没有这些字段（required 是 `todoId/type/state/prompt`，options 是字符串
+枚举）。客户端严格解码时一条坏待办把整份 TaskDetail 解崩，表现是「没有输出、产物
+胶囊整片消失」；排查时照着 mock 反推宿主，绕了两轮才定位是假数据。
+
+现在 `mock-data.mjs` 与 `spec/fixtures/tasks/task.detail.json` 都按 `Todo` 形状给样本，
+`test/timeline-attachments.mjs` 逐字段锁住 required / enum。原则：**mock 只能给契约里
+有的字段，且形状必须与 schema 一致**——否则「看起来像没数据」的假故障会反复出现。
+
+## 12. 下一步
 
 1. **X2 真宿主实跑**：desktop profile 的 `cordis.patch.yml` 打开 `host: mux` 重启，对照 diag 服务可见性。
 2. 真机安装 cloudflared 后（macOS `brew install cloudflared`；Windows 下载 `cloudflared.exe`

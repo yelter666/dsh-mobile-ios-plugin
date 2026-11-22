@@ -16,11 +16,12 @@
 
 import crypto from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join as joinPath } from 'node:path';
+import os from 'node:os';
 import { fail, GatewayError } from '../protocol.mjs';
 import { displayHostName } from '../host-name.mjs';
 import { translateLiveEvent } from './session-history.mjs';
-import { deriveArtifacts, decodeArtifactId, mimeOf } from './artifacts.mjs';
+import { deriveArtifacts, decodeArtifactId, mimeOf, sniffMime } from './artifacts.mjs';
 
 import { toGatewayError, isHostRemoteError } from './host-errors.mjs';
 
@@ -986,6 +987,43 @@ export function createCordisHost({ ctx, log = () => {}, hostname = displayHostNa
       });
     },
 
+    /**
+     * 读宿主附件对象（2026-11-22）：手机时间线里「我发的那张图」。
+     *
+     * 宿主的附件对象库由 `attachmentId` 决定路径，文件名就是摘要本身（无扩展名）：
+     *   ~/.dsh/attachments/v1/objects/<hex 前两位>/<hex 其余 62 位>
+     * 真机取证：会话 session-b77cabee 的 seq=318 里 `sha256:b1166d2e…`，
+     * 对象库 objects/b1/b1166d2e… 大小 360,968 B，与消息里的 bytes 完全一致。
+     *
+     * 边界：只读；只接受 `sha256:<64 位十六进制>`；只拼在 DSH_HOME 之下。
+     * 不接受任意路径，也不解 base64——字节就是字节，让客户端直接显示。
+     */
+    async readAttachment(attachmentId) {
+      return call('attachments/read', async () => {
+        const id = String(attachmentId ?? '');
+        const matched = /^sha256:([0-9a-f]{64})$/.exec(id);
+        if (!matched) throw fail(4400, 'attachmentId 必须是 sha256:<64 位小写十六进制>');
+        const hex = matched[1];
+        const home = process.env.DSH_HOME || joinPath(os.homedir(), '.dsh');
+        const file = joinPath(home, 'attachments', 'v1', 'objects', hex.slice(0, 2), hex.slice(2));
+        let info;
+        try {
+          info = statSync(file);
+        } catch {
+          throw fail(4404, '附件不在本机对象库里（可能已被清理）', { detail: `attachment=${hex.slice(0, 12)}…` });
+        }
+        if (!info.isFile()) throw fail(4404, '附件不在本机对象库里（可能已被清理）');
+        if (info.size > 25 * 1024 * 1024) throw fail(4021, '附件过大，请在电脑端查看');
+        const data = readFileSync(file);
+        return {
+          name: `attachment-${hex.slice(0, 8)}`,
+          mime: sniffMime(data),
+          sizeBytes: info.size,
+          data,
+        };
+      });
+    },
+
     async createTask({
       prompt, cwd, workspaceId, attachments, permission, provider, model, reasoningEffort,
     } = {}) {
@@ -1391,6 +1429,10 @@ export function createCordisHost({ ctx, log = () => {}, hostname = displayHostNa
               name: m.name,
               ...(typeof m.description === 'string' ? { description: m.description } : {}),
               ...(m.reasoning?.defaultEffort ? { defaultEffort: m.reasoning.defaultEffort } : {}),
+              // 输入模态（2026-11-22）：手机选图前就能提示「这个模型不接受图片」，
+              // 而不是等宿主在 prompt 准入处拒了才发现。宿主没声明就不带，
+              // 客户端按「未声明=只有 text」处理——如实透传，不替宿主补默认值。
+              ...(Array.isArray(m.inputModalities) ? { inputModalities: m.inputModalities } : {}),
             })),
           })),
           failures: Array.isArray(catalog?.failures) ? catalog.failures : [],
@@ -1447,6 +1489,10 @@ export function createCordisHost({ ctx, log = () => {}, hostname = displayHostNa
               name: m.name,
               ...(typeof m.description === 'string' ? { description: m.description } : {}),
               ...(m.reasoning?.defaultEffort ? { defaultEffort: m.reasoning.defaultEffort } : {}),
+              // 输入模态（2026-11-22）：手机选图前就能提示「这个模型不接受图片」，
+              // 而不是等宿主在 prompt 准入处拒了才发现。宿主没声明就不带，
+              // 客户端按「未声明=只有 text」处理——如实透传，不替宿主补默认值。
+              ...(Array.isArray(m.inputModalities) ? { inputModalities: m.inputModalities } : {}),
             })),
           })),
           failures: Array.isArray(catalog?.failures) ? catalog.failures : [],
