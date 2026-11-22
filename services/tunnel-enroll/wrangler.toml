@@ -1,0 +1,20 @@
+name = "dsh-tunnel-enroll"
+main = "src/worker.mjs"
+compatibility_date = "2026-11-01"
+
+# workers.dev 在国内被 DNS 污染，必须用自有域名承载：
+routes = [
+  { pattern = "enroll.matrixboard.cn", custom_domain = true }
+]
+
+# 固定地址开通服务：给每台插件主机分发 dsh-xxxx.matrixboard.cn 隧道三件套。
+# zone 级 API Token 只放这里（secret），插件主机永远接触不到。
+# 部署步骤见 README.md。
+
+[vars]
+BASE_DOMAIN = "matrixboard.cn"
+PREFIX = "dsh"
+# ACCOUNT_ID / ZONE_ID 建议配置后可省两次 API 往返：
+# npx wrangler secret put 不适合 vars；直接在这里填或用 `wrangler secret put` 也行（二者其一）。
+ACCOUNT_ID = "bb53f02d73b7b0722fca9cbe23bdf10f"
+ZONE_ID = "a4beaf5f3fabb98f4b1b243e312ad41d"

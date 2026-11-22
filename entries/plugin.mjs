@@ -13,6 +13,7 @@ import { createMockHost } from '../src/adapter/mock-host.mjs';
 import { createMuxHost } from '../src/adapter/mux-host.mjs';
 import { createCordisHost } from '../src/adapter/cordis-host.mjs';
 import { resolveProvisioner, defaultTunnelStateFile } from '../src/provision-select.mjs';
+import { DISTRIBUTION_TUNNEL } from '../src/distribution-config.mjs';
 import { PLUGIN_VERSION } from '../src/version.mjs';
 
 export const name = 'dsh-mobile-ios';
@@ -118,9 +119,9 @@ export function apply(ctx = {}, config = {}) {
         apiToken: tunnelCfg.apiToken || process.env.DSH_CF_API_TOKEN,
         accountId: tunnelCfg.accountId || process.env.DSH_CF_ACCOUNT_ID,
         zoneId: tunnelCfg.zoneId || process.env.DSH_CF_ZONE_ID,
-        endpoint: tunnelCfg.endpoint || process.env.DSH_TUNNEL_ENDPOINT,
-        enrollToken: tunnelCfg.enrollToken || process.env.DSH_TUNNEL_ENROLL_TOKEN,
-        baseDomain: tunnelCfg.baseDomain || process.env.DSH_TUNNEL_BASE_DOMAIN || 'matrixboard.cn',
+        endpoint: tunnelCfg.endpoint || process.env.DSH_TUNNEL_ENDPOINT || DISTRIBUTION_TUNNEL.endpoint,
+        enrollToken: tunnelCfg.enrollToken || process.env.DSH_TUNNEL_ENROLL_TOKEN || DISTRIBUTION_TUNNEL.enrollToken,
+        baseDomain: tunnelCfg.baseDomain || process.env.DSH_TUNNEL_BASE_DOMAIN || DISTRIBUTION_TUNNEL.baseDomain,
         executable: cloudflareBin,
       },
       stateFile: tunnelStateFile,

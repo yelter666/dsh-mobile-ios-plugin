@@ -280,6 +280,9 @@ export function createRestRouter({ core, pairing, host, tickets, config = {}, lo
       provisioned: Boolean(prov?.provisioned),
       hostname: base.hostname ?? prov?.hostname ?? null,
       provisionerKind: prov?.kind ?? null,
+      // 分发形态：开通服务（hosted）已配置时，面板弹「一键开通固定地址」，
+      // 全程不需要用户接触 Cloudflare；false 才会走自托管/浏览器授权引导。
+      hostedConfigured: prov?.kind === 'hosted',
       // 固定地址即使进程停了也照实给出来：桌面面板要能显示「地址是这个，当前未开启」
       fixedUrl: prov?.url ?? null,
       // 域名在公网上解析得到吗。false 时地址虽在、扫码却连不上（zone pending / NS 没指过来），

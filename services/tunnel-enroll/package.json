@@ -1,0 +1,18 @@
+{
+  "name": "tunnel-enroll",
+  "version": "1.0.0",
+  "description": "分发形态的固定地址开通服务：插件主机拿 enroll 凭证向本服务换隧道三件套 （`dsh-xxxx.matrixboard.cn` 子域 + tunnelId + tunnel token），**小白用户全程 不需要任何 Cloudflare 账号**。zone 级 API Token 只存在于 Worker secret。",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "wrangler": "^4.166.0"
+  }
+}

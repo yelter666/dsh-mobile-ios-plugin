@@ -76,7 +76,7 @@ function allTexts(root, out = []) {
  * @param {object} opts
  * @param {boolean} [opts.clipboardFails] 剪贴板与 execCommand 全失败（验证手动兜底）
  */
-function makeHarness({ clipboardFails = false } = {}) {
+function makeHarness({ clipboardFails = false, hosted = false } = {}) {
   const body = makeEl('body');
   let execOk = !clipboardFails;
   const documentStub = {
@@ -90,7 +90,8 @@ function makeHarness({ clipboardFails = false } = {}) {
   let captured = null;
   const fetchCalls = [];
   // canAutoInstall=false：新方案必须不再依赖这个门槛（未知平台也有出口）
-  const tunnel = { executable: 'missing', state: 'stopped', canAutoInstall: false, dnsOk: true, provisioned: false };
+  const tunnel = { executable: 'missing', state: 'stopped', canAutoInstall: false, dnsOk: true,
+    provisioned: false, ...(hosted ? { hostedConfigured: true, provisionerKind: 'hosted' } : {}) };
   const copied = [];
 
   const sandbox = {
@@ -111,7 +112,7 @@ function makeHarness({ clipboardFails = false } = {}) {
     AbortController, AbortSignal,
     fetch: async (url, opts) => {
       const method = opts?.method || 'GET';
-      fetchCalls.push({ url, method, body: opts?.body });
+      fetchCalls.push({ url, method, body: opts?.body, headers: opts?.headers });
       if (url.includes('/health')) return { ok: true, json: async () => ({ ok: true }) };
       if (url.includes('/mobile/v1/clipboard')) {
         // 复制一级走网关写系统剪贴板；失败场景让所有一级都失败，逼出降级链
@@ -231,7 +232,11 @@ console.log('\ncloudflared → Harness Agent 安装指令链路回归\n');
   h.copyBtn()?.click();
   await sleep(80);
   const clipCall = h.fetchCalls.find((c) => c.url.includes('/mobile/v1/clipboard'));
-  check('剪贴板端点收到完整指令', clipCall?.body?.text === h.promptEl()?.value, JSON.stringify(clipCall?.body).slice(0, 120));
+  // 0.3.3 起 fetchJson 把对象 body 序列化成 JSON 字符串（真实浏览器必须如此，
+  // 否则 fetch 会把对象转成 "[object Object]" 文本导致服务端 400）
+  const sent = typeof clipCall?.body === 'string' ? JSON.parse(clipCall.body) : clipCall?.body;
+  check('剪贴板端点收到完整指令', sent?.text === h.promptEl()?.value, JSON.stringify(clipCall?.body).slice(0, 120));
+  check('剪贴板请求带 JSON Content-Type', (clipCall?.headers?.['Content-Type'] || '').includes('application/json'));
 }
 
 // 4. 复制全线失败：明确提示手动复制并补一个已全选的输入框，不演「点了没反应」
@@ -276,6 +281,23 @@ console.log('\ncloudflared → Harness Agent 安装指令链路回归\n');
   check('未装好时明确提示还没检测到', allTexts(h.body).some((t) => t.includes('还没检测到 cloudflared')));
   check('未装好时不关弹窗', !!h.promptEl());
   check('未装好时不出码', !h.fetchCalls.some((c) => c.url.includes('tunnel/start')));
+}
+
+// 7. hosted 一键开通（分发形态）：不弹任何引导，一次点击完成开通+出码。
+//    hostedConfigured 时 remoteMainAction 直接 tunnel/start——服务端经开通服务
+//    分配子域并起隧道，用户全程零 Cloudflare 操作、零弹窗打断。
+{
+  const h = makeHarness({ hosted: true });
+  await openInstallPrompt(h);
+  h.markInstalled();
+  h.fetchCalls.length = 0;
+  h.action('我装好了，继续')?.click();
+  await sleep(150);
+  check('hosted 形态不再弹 Cloudflare 登录引导', !allTexts(h.body).some((t) => t.includes('登录 Cloudflare')));
+  check('hosted 形态直接开启远程（tunnel/start，服务端顺带开通固定地址）',
+    h.fetchCalls.some((c) => c.url.includes('tunnel/start') && c.method === 'POST'));
+  check('全程不触发 Cloudflare 授权端点', !h.fetchCalls.some((c) => c.url.includes('/tunnel/login')));
+  check('面板不出「浏览器授权」文案', !allTexts(h.body).some((t) => t.includes('浏览器里选择')));
 }
 
 console.log(`\n结果：${pass} 通过 / ${failures.length} 失败`);
