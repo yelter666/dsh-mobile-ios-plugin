@@ -30,7 +30,7 @@ function makeEl(tag = 'div') {
     set textContent(v) { this._text = String(v); this.children = []; },
     append(...els) { this.children.push(...els); },
     remove() { this._removed = true; },
-    setAttribute() {}, select() {},
+    setAttribute() {}, select() {}, focus() {}, setSelectionRange() {},
     addEventListener(ev, fn) { (this.listeners[ev] ||= []).push(fn); },
     querySelector() { return null; },
     getAttribute() { return ''; },
@@ -156,6 +156,22 @@ copied.length = 0;
 const copiedOk = await copyToClipboard('dsh-mobile-ios@0.2.4');
 check('复制成功返回 true', copiedOk === true);
 check('复制内容正确', copied.includes('dsh-mobile-ios@0.2.4'));
+
+// 4b. 实测根因：dsh-app:// 下 writeText 可能永不 settle —— 不能把点击处理永久挂起。
+//     竞速 800ms 后必须降级到 execCommand，且返回值仍为 true。
+{
+  const stuckWrite = () => new Promise(() => {});
+  navigatorStub.clipboard = { writeText: stuckWrite };
+  const started = Date.now();
+  const ok = await Promise.race([
+    copyToClipboard('dsh-mobile-ios@0.2.4'),
+    new Promise((r) => setTimeout(() => r('HUNG'), 3000)),
+  ]);
+  check('clipboard 挂起时不会永久卡住（超时降级）', ok !== 'HUNG', `耗时 ${Date.now() - started}ms`);
+  check('超时降级后仍复制成功', ok === true);
+  check('超时降级耗时在竞速窗口附近', Date.now() - started < 2000, `耗时 ${Date.now() - started}ms`);
+  navigatorStub.clipboard = { writeText: async () => { copied.push(lastCopyValue); } };
+}
 
 // ── 一步更新状态机 ──────────────────────────────────────────
 console.log('\n一步更新状态机\n');

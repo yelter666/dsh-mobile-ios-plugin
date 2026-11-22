@@ -1,15 +1,13 @@
-// test/install-continue.mjs — cloudflared 安装确认链路回归
+// test/install-continue.mjs — cloudflared「交给 Harness Agent 安装」链路回归
 //
-// 用户诉求：点「安装 cloudflared 并开启远程」→ 确认后应有即时反馈，
-// 下载期间显示**真实字节进度**，可取消并改手动安装，装完自动继续出码。
-// 本套件用最小 DOM stub 走真实链路 apply→面板→主按钮→确认按钮，
-// 可控 setInterval 逐步推进任务状态，不靠真等 1.2 秒。
+// 0.3.1 起插件彻底不再自己下载 cloudflared（慢网络/自定义协议下反复表现为「点了没反应」）。
+// 缺依赖时只弹一个可复制指令框：用户复制给 DeepSeek Harness 桌面端 Agent 安装调试。
+// 本套件走真实 apply → 面板 → 主按钮 → 弹窗按钮，验证「复制拿得到」且「不再碰下载」。
 
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
-const DOWNLOAD_URL = 'https://github.com/cloudflare/cloudflared/releases/download/2026.11.1/cloudflared-windows-amd64.exe';
-const TOTAL = 55483112;
+const DOWNLOAD_BASE = 'https://github.com/cloudflare/cloudflared/releases/download/2026.11.1';
 
 let pass = 0;
 const failures = [];
@@ -20,7 +18,7 @@ function check(name, cond, detail = '') {
 
 function makeEl(tag = 'div') {
   const el = {
-    tagName: tag.toUpperCase(), children: [], className: '', _text: '',
+    tagName: tag.toUpperCase(), children: [], className: '', _text: '', value: '',
     style: { cssText: '', setProperty() {} }, listeners: {}, id: '', type: '', disabled: false,
     classList: {
       _set: new Set(),
@@ -31,10 +29,17 @@ function makeEl(tag = 'div') {
     get textContent() { return this._text; },
     set textContent(v) { this._text = String(v); this.children = []; },
     append(...els) { for (const e of els) { e._parent = this; this.children.push(e); } },
+    insertBefore(el, ref) {
+      el._parent = this;
+      const i = ref ? this.children.indexOf(ref) : -1;
+      if (i >= 0) this.children.splice(i, 0, el); else this.children.push(el);
+      return el;
+    },
     remove() { this._removed = true; const i = (this._parent?.children || []).indexOf(this); if (i >= 0) this._parent.children.splice(i, 1); },
     setAttribute(k, v) { this[k] = v; },
     getAttribute(k) { return this[k] || ''; },
-    select() {}, focus() {},
+    select() { this._selected = true; }, focus() { this._focused = true; },
+    setSelectionRange(a, b) { this._range = [a, b]; },
     addEventListener(ev, fn) { (this.listeners[ev] ||= []).push(fn); },
     removeEventListener(ev, fn) { if (this.listeners[ev]) this.listeners[ev] = this.listeners[ev].filter((f) => f !== fn); },
     querySelector(sel) { return queryTree(this, sel)[0] || null; },
@@ -69,73 +74,51 @@ function allTexts(root, out = []) {
 
 /**
  * @param {object} opts
- * @param {boolean} [opts.installFails]     任务失败
- * @param {boolean} [opts.alreadyInstalled] 服务端直接复用（不下载）
- * @param {Array}   [opts.steps]            GET 依次返回的任务状态
+ * @param {boolean} [opts.clipboardFails] 剪贴板与 execCommand 全失败（验证手动兜底）
  */
-function makeHarness({ installFails = false, alreadyInstalled = false, steps = null } = {}) {
+function makeHarness({ clipboardFails = false } = {}) {
   const body = makeEl('body');
+  let execOk = !clipboardFails;
   const documentStub = {
     body, head: makeEl('head'), documentElement: makeEl('html'),
     createElement: (t) => makeEl(t),
     getElementById: (id) => queryTree(body, '#' + id)[0] || null,
-    addEventListener() {}, removeEventListener() {}, execCommand: () => true,
+    addEventListener() {}, removeEventListener() {},
+    execCommand: () => execOk,
     querySelector(sel) { return queryTree(body, sel)[0] || null; },
   };
   let captured = null;
   const fetchCalls = [];
-  const intervals = [];
-  const tunnel = { executable: 'missing', state: 'stopped', canAutoInstall: true, dnsOk: true, provisioned: false };
-  let canceled = false;
-  const queue = steps
-    ? [...steps]
-    : [
-      { state: 'running', loaded: 5 * 1048576, total: TOTAL, percent: 9 },
-      { state: 'running', loaded: 28 * 1048576, total: TOTAL, percent: 52 },
-      { state: 'done', loaded: TOTAL, total: TOTAL, percent: 100 },
-    ];
+  // canAutoInstall=false：新方案必须不再依赖这个门槛（未知平台也有出口）
+  const tunnel = { executable: 'missing', state: 'stopped', canAutoInstall: false, dnsOk: true, provisioned: false };
+  const copied = [];
 
   const sandbox = {
     window: { matchMedia: () => ({ matches: false }), __ModuleLoader__: { load(mod) { captured = mod; } } },
     document: documentStub,
-    navigator: { clipboard: { writeText: async () => {} } },
+    navigator: {
+      clipboard: {
+        writeText: async (t) => {
+          if (clipboardFails) throw new Error('clipboard unavailable');
+          copied.push(t);
+        },
+      },
+    },
     console: { log() {}, warn() {}, error() {}, debug() {} },
     setTimeout, clearTimeout,
-    // 轮询定时器交给测试手动 tick，避免测试真的等 1.2 秒
-    setInterval: (fn) => { intervals.push(fn); return intervals.length; },
-    clearInterval: () => {},
+    // 面板自身有 summary 轮询定时器；测试里挂起而不真跑，避免进程不退出
+    setInterval: () => 0, clearInterval: () => {},
     AbortController, AbortSignal,
     fetch: async (url, opts) => {
       const method = opts?.method || 'GET';
       fetchCalls.push({ url, method });
       if (url.includes('/health')) return { ok: true, json: async () => ({ ok: true }) };
-      if (url.includes('/install-cloudflared/cancel')) {
-        canceled = true;
-        return { ok: true, json: async () => ({ ok: true, canceled: true }) };
-      }
-      if (url.includes('install-cloudflared') && method === 'POST') {
-        // 失败发生在下载任务里（超时），不是启动请求：这才是 0.3.0 的真实链路。
-        if (alreadyInstalled) {
-          tunnel.executable = 'found';
-          return { ok: true, json: async () => ({ ok: true, installed: true, reused: true, executable: 'x', downloadUrl: DOWNLOAD_URL }) };
-        }
-        return { ok: true, json: async () => ({ ok: true, started: true, jobId: 'job-1', downloadUrl: DOWNLOAD_URL }) };
-      }
-      if (url.includes('install-cloudflared') && method === 'GET') {
-        const st = canceled
-          ? { state: 'canceled', error: { code: 'DOWNLOAD_CANCELLED', message: '已取消下载' } }
-          : installFails
-            ? { state: 'failed', error: { code: 'DOWNLOAD_TIMEOUT', message: '下载超时（国内访问 GitHub 较慢）' } }
-            : (queue.shift() || { state: 'running', loaded: 0, total: TOTAL, percent: 0 });
-        if (st.state === 'done') tunnel.executable = 'found';
-        return { ok: true, json: async () => ({ ok: true, ...st, downloadUrl: DOWNLOAD_URL }) };
+      if (url.includes('/summary')) {
+        return { ok: true, json: async () => ({ ok: true, version: '0.3.1', tunnel: { ...tunnel } }) };
       }
       if (url.includes('tunnel/start')) {
         tunnel.state = 'running';
         return { ok: true, json: async () => ({ ok: true, state: 'running', url: 'https://example.trycloudflare.com' }) };
-      }
-      if (url.includes('/summary')) {
-        return { ok: true, json: async () => ({ ok: true, version: '0.3.0', tunnel: { ...tunnel, downloadUrl: DOWNLOAD_URL } }) };
       }
       return { ok: true, json: async () => ({ ok: true, code: 'PAIR123', url: 'https://example' }) };
     },
@@ -171,122 +154,109 @@ function makeHarness({ installFails = false, alreadyInstalled = false, steps = n
     },
   };
   return {
-    mod, ctx, body, documentStub, fetchCalls, tunnel,
+    mod, ctx, body, documentStub, fetchCalls, tunnel, copied,
+    markInstalled: () => { tunnel.executable = 'found'; },
     getTrigger: () => registeredEl,
     setFooter: () => footerRender?.({ wide: true }),
-    // 手动推进一次轮询；轮询内部 await fetch，故这里也要等一个微任务
-    tick: async () => { for (const fn of intervals) await fn(); await sleep(10); },
+    actions: () => queryTree(body, '.modal-actions')[0]?.children || [],
+    action: (label) => (queryTree(body, '.modal-actions')[0]?.children || []).find((b) => (b._text || '').includes(label)),
+    promptEl: () => queryTree(body, '.modal-prompt')[0] || null,
   };
-}
-
-/** 打开面板并点到安装确认弹窗，返回确认按钮 */
-async function openInstallConfirm(h) {
-  h.mod.apply(h.ctx);
-  await sleep(250);
-  h.setFooter();
-  h.getTrigger()?.click();
-  await sleep(80);
-  const mainBtn = h.documentStub.getElementById('dsh-mios-remote-main');
-  mainBtn?.click();
-  await sleep(40);
-  return queryTree(h.body, '.modal-actions')[0]?.children?.find((b) => (b._text || '').includes('确认下载并安装'));
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-console.log('\ncloudflared 安装确认链路回归\n');
+async function openInstallPrompt(h) {
+  h.mod.apply(h.ctx);
+  await sleep(200);
+  h.setFooter();
+  h.getTrigger()?.click();
+  await sleep(60);
+  h.documentStub.getElementById('dsh-mios-remote-main')?.click();
+  await sleep(60);
+}
 
-// 1. 进度链路：确认前给地址 → 确认后真实进度 → 完成后自动继续出码
+console.log('\ncloudflared → Harness Agent 安装指令链路回归\n');
+
+// 1. 缺依赖弹窗：文案、可复制指令、六平台官方地址、目标目录、Agent 引导
 {
   const h = makeHarness();
-  const confirm = await openInstallConfirm(h);
-  check('缺依赖时主按钮显示安装文案', (h.documentStub.getElementById('dsh-mios-remote-main')?._text || '').includes('安装 cloudflared'));
-  check('弹出安装确认框', !!confirm);
-  check('确认前弹窗给出官方下载地址', allTexts(h.body).some((t) => t.includes('releases/download/2026.11.1')));
-  h.fetchCalls.length = 0;
-  confirm?.click();
-  await sleep(80);
-  check('确认后发出安装请求', h.fetchCalls.some((c) => c.url.includes('install-cloudflared') && c.method === 'POST'));
-  check('下载弹窗显示进度条', !!queryTree(h.body, '.modal-progress')[0]);
-  check('下载弹窗提供取消出口', allTexts(h.body).some((t) => t.includes('取消并改手动安装')));
-  check('下载弹窗给出官方地址', allTexts(h.body).some((t) => t.includes('releases/download/2026.11.1')));
-  await h.tick();
-  check('第 1 次轮询显示真实字节进度（9%）', allTexts(h.body).some((t) => t.includes('9%')));
-  await h.tick();
-  check('第 2 次轮询进度递进（52%）', allTexts(h.body).some((t) => t.includes('52%')));
-  check('进度中未提前出码', !h.fetchCalls.some((c) => c.url.includes('tunnel/start')));
-  await h.tick();
-  check('下载完成弹窗出现', allTexts(h.body).some((t) => t.includes('安装完成')));
-  await sleep(1200);
-  check('安装成功后自动继续开启远程（tunnel/start）', h.fetchCalls.some((c) => c.url.includes('tunnel/start') && c.method === 'POST'));
+  await openInstallPrompt(h);
+  check('主按钮明确是「查看安装指引」', (h.documentStub.getElementById('dsh-mios-remote-main')?._text || '').includes('查看 cloudflared 安装指引'));
+  check('弹出「需要安装 cloudflared」弹窗', allTexts(h.body).some((t) => t.includes('需要安装 cloudflared')));
+  const ta = h.promptEl();
+  check('弹窗内含可复制指令文本框', !!ta);
+  check('指令文本框为只读', ta?.readOnly === true);
+  check('指令文本框自动全选（复制失败也能手动 ⌘C）', ta?._selected === true && Array.isArray(ta?._range));
+  const text = ta?.value || '';
+  check('指令写明交给 DeepSeek Harness 桌面端 Agent', text.includes('DeepSeek Harness') || allTexts(h.body).some((t) => t.includes('DeepSeek Harness')));
+  check('指令含 6 个平台官方地址', ['cloudflared-darwin-arm64.tgz', 'cloudflared-darwin-amd64.tgz', 'cloudflared-windows-amd64.exe', 'cloudflared-windows-386.exe', 'cloudflared-linux-amd64', 'cloudflared-linux-arm64'].every((f) => text.includes(`${DOWNLOAD_BASE}/${f}`)));
+  check('指令含 macOS/Linux 目标目录', text.includes('~/.dsh/mobile-access/components/cloudflared/2026.11.1/cloudflared'));
+  check('指令含 Windows 目标目录', text.includes('\\.dsh\\mobile-access\\components\\cloudflared\\2026.11.1\\cloudflared.exe'));
+  check('指令含 --version 校验', text.includes('cloudflared --version'));
+  check('指令含重开 Harness 让插件重新探测', text.includes('重启 DeepSeek Harness'));
+  check('指令含验收标准', text.includes('【验收】'));
 }
 
-// 2. 失败路径：失败弹窗带下载地址与手动步骤，不触发自动继续
-{
-  const h = makeHarness({ installFails: true });
-  const confirm = await openInstallConfirm(h);
-  h.fetchCalls.length = 0;
-  confirm?.click();
-  await sleep(80);
-  await h.tick();
-  check('失败时显示失败弹窗', allTexts(h.body).some((t) => t.includes('安装失败')));
-  check('失败说明写明下载超时', allTexts(h.body).some((t) => t.includes('下载超时')));
-  check('失败弹窗带官方下载地址', allTexts(h.body).some((t) => t.includes('releases/download/2026.11.1')));
-  check('失败弹窗带手动安装目录', allTexts(h.body).some((t) => t.includes('components\\cloudflared\\2026.11.1')));
-  check('失败时提供重试入口', allTexts(h.body).some((t) => t.includes('重试安装')));
-  check('失败时不自动开启远程', !h.fetchCalls.some((c) => c.url.includes('tunnel/start')));
-}
-
-// 3. 慢下载：进度持续可见，不因耗时长而消失
-{
-  const slowSteps = Array.from({ length: 6 }, (_, i) => ({
-    state: 'running', loaded: (i + 1) * 5 * 1048576, total: TOTAL, percent: (i + 1) * 9,
-  })).concat([{ state: 'done', loaded: TOTAL, total: TOTAL, percent: 100 }]);
-  const h = makeHarness({ steps: slowSteps });
-  const confirm = await openInstallConfirm(h);
-  confirm?.click();
-  await sleep(80);
-  for (let i = 0; i < 4; i += 1) {
-    await h.tick();
-    check(`慢下载第 ${i + 1} 次轮询仍在安装中`, allTexts(h.body).some((t) => t.includes('正在安装')));
-  }
-  check('慢下载期间进度已更新', allTexts(h.body).some((t) => t.includes('36%')));
-  check('慢下载期间没有自动出码', !h.fetchCalls.some((c) => c.url.includes('tunnel/start')));
-  for (let i = 0; i < 3; i += 1) await h.tick();
-  await sleep(1200);
-  check('慢下载完成后仍能自动继续', h.fetchCalls.some((c) => c.url.includes('tunnel/start')));
-}
-
-// 4. 取消：点「取消并改手动安装」→ 发取消请求 → 给手动指引 → 不出码
+// 2. 关键：整条链路不再发起网关下载（这正是「按钮无反应」的根因所在）
 {
   const h = makeHarness();
-  const confirm = await openInstallConfirm(h);
+  await openInstallPrompt(h);
   h.fetchCalls.length = 0;
-  confirm?.click();
-  await sleep(80);
-  await h.tick();
-  const cancelBtn = queryTree(h.body, '.modal-actions')[0]?.children?.find((b) => (b._text || '').includes('取消并改手动安装'));
-  check('下载中存在取消按钮', !!cancelBtn);
-  cancelBtn?.click();
-  await sleep(150);
-  check('取消请求已发出', h.fetchCalls.some((c) => c.url.includes('/install-cloudflared/cancel') && c.method === 'POST'));
-  check('取消后明确提示未安装', allTexts(h.body).some((t) => t.includes('已取消安装')));
-  check('取消后仍给官方地址', allTexts(h.body).some((t) => t.includes('releases/download/2026.11.1')));
-  check('取消后给出手动安装步骤', allTexts(h.body).some((t) => t.includes('重开桌面端面板')));
-  check('取消后不自动出码', !h.fetchCalls.some((c) => c.url.includes('tunnel/start')));
+  h.action('复制安装指令')?.click();
+  await sleep(60);
+  check('复制指令不触发 install-cloudflared 下载', !h.fetchCalls.some((c) => c.url.includes('install-cloudflared')));
+  check('复制指令不触发进度轮询端点', !h.fetchCalls.some((c) => c.url.includes('install-cloudflared') && c.method === 'GET'));
+  h.fetchCalls.length = 0;
+  h.action('我装好了，继续')?.click();
+  await sleep(60);
+  check('未装好时点继续也不触发下载', !h.fetchCalls.some((c) => c.url.includes('install-cloudflared')));
 }
 
-// 5. 复用：服务端说已装好，跳过进度直接继续（兼容旧同步语义）
+// 3. 复制按钮：拿到完整指令并给出可见成功反馈
 {
-  const h = makeHarness({ alreadyInstalled: true });
-  const confirm = await openInstallConfirm(h);
-  h.fetchCalls.length = 0;
-  confirm?.click();
+  const h = makeHarness();
+  await openInstallPrompt(h);
+  h.action('复制安装指令')?.click();
+  await sleep(80);
+  check('剪贴板收到完整指令', h.copied.length === 1 && h.copied[0] === h.promptEl()?.value);
+  check('复制成功有可见提示', allTexts(h.body).some((t) => t.includes('已复制') && t.includes('DeepSeek Harness')));
+  check('复制后弹窗仍保留指令框', !!h.promptEl());
+}
+
+// 4. 复制全线失败：自动补一个已全选的手动输入框，不演「点了没反应」
+{
+  const h = makeHarness({ clipboardFails: true });
+  await openInstallPrompt(h);
+  h.action('复制安装指令')?.click();
   await sleep(100);
-  check('复用时直接显示安装完成', allTexts(h.body).some((t) => t.includes('安装完成')));
-  check('复用时不进入下载进度', !queryTree(h.body, '.modal-progress')[0]);
-  await sleep(1200);
-  check('复用后仍能自动继续出码', h.fetchCalls.some((c) => c.url.includes('tunnel/start')));
+  check('复制失败明确提示手动复制', allTexts(h.body).some((t) => t.includes('请按 Ctrl/⌘+C 手动复制')));
+  const pick = queryTree(h.body, '.modal-pick')[0];
+  check('复制失败补出手动输入框', !!pick);
+  check('手动输入框内容是同一段指令', pick?.value === h.promptEl()?.value);
+}
+
+// 5. 装好后点「我装好了，继续」→ 探测到 cloudflared → 继续出码
+{
+  const h = makeHarness();
+  await openInstallPrompt(h);
+  h.markInstalled();
+  h.fetchCalls.length = 0;
+  h.action('我装好了，继续')?.click();
+  await sleep(150);
+  check('装好后能继续开启远程（tunnel/start）', h.fetchCalls.some((c) => c.url.includes('tunnel/start') && c.method === 'POST'));
+}
+
+// 6. 还没装就点继续：原地提示，既不关窗也不假装成功
+{
+  const h = makeHarness();
+  await openInstallPrompt(h);
+  h.fetchCalls.length = 0;
+  h.action('我装好了，继续')?.click();
+  await sleep(120);
+  check('未装好时明确提示还没检测到', allTexts(h.body).some((t) => t.includes('还没检测到 cloudflared')));
+  check('未装好时不关弹窗', !!h.promptEl());
+  check('未装好时不出码', !h.fetchCalls.some((c) => c.url.includes('tunnel/start')));
 }
 
 console.log(`\n结果：${pass} 通过 / ${failures.length} 失败`);

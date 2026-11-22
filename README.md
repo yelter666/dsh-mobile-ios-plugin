@@ -398,27 +398,31 @@ mock 的 `pendingTodos` 曾经是 `{ question, options:[{id,label}], createdAt }
 `test/timeline-attachments.mjs` 逐字段锁住 required / enum。原则：**mock 只能给契约里
 有的字段，且形状必须与 schema 一致**——否则「看起来像没数据」的假故障会反复出现。
 
-## 12. cloudflared 自举安装：真实进度与自救出口（0.3.0）
+## 12. cloudflared 安装：交给 Harness Agent（0.3.1）
 
-新机器装插件后点「确认下载并安装」曾有「毫无反应」的现场反馈。根因不是按钮没绑事件，
-而是国内直连 GitHub Release 只有 ~73 KB/s（Windows 包 53MB ≈ 12 分钟），
-旧实现同步 `arrayBuffer()` 全程静默、面板 240 秒超时后错误又被吞掉。
+新机器装插件后点「确认下载并安装」反复有「毫无反应」的现场反馈。0.3.0 曾把下载改成
+真实字节进度 + 单例任务 + 取消/失败出口（见 `docs/setup/cloudflared_安装无反应_问题评估与方案.md`），
+但真机仍不可用：**慢网络 + Electron `dsh-app://` 自定义协议下的剪贴板/下载能力，靠插件自己
+在面板里全部兜住不现实**。0.3.1 改为把「装」这件事整体交出去：
 
-0.3.0 的处理（见 `docs/setup/cloudflared_安装无反应_问题评估与方案.md`）：
+- **插件不再自己下载**：缺 cloudflared 时弹窗给一段**可直接复制的指令**，
+  用户粘贴给 DeepSeek Harness 桌面端 Agent，由 Agent 下载、解压、放到私有目录并调试隧道。
+- **复制不能只押在按钮上**：指令框是可见、只读、打开即自动全选的 textarea；
+  `⌘/Ctrl+C` 永远能拿到。复制按钮点击即显示「复制中…」。
+- **剪贴板 API 必须带超时**：`navigator.clipboard.writeText()` 在自定义协议下可能永远
+  pending，直接 `await` 会把点击处理挂死（这正是「复制包名点了没反应」的根因）。
+  `copyToClipboard()` 用 800ms 竞速后降级到**弹窗内可见文本框** → 屏幕外 textarea →
+  contenteditable；全失败才补一个可手选输入框。更新弹窗同样带可见包名框。
+- **服务端能力保留不删**：`POST/GET /tunnel/install-cloudflared` 与其状态机、校验仍可用于
+  其他调用方（如脚本），但面板入口不再依赖它，`summary.canAutoInstall` 也不再是弹窗门槛
+  ——任何平台缺依赖都有「复制指令找 Agent」的出口。
+- **装完能收口**：点「我装好了，继续」→ `probe()` 确认 `executable === 'found'` →
+  继续「确保隧道起来 → 出码」；没装好则原地提示，不关窗、不假成功。
 
-- **不内嵌二进制**：用户下载的 `cloudflared-master.zip` 是 880KB 的 **Go 源码**，
-  不是可执行文件；编译产物仍是 Windows 52.9MB / macOS 19–21MB，
-  内嵌会让 npm 包从 350KB 膨胀 50–150 倍。保持按需下载到私有目录。
-- **启动即返回**：`POST /tunnel/install-cloudflared` 只启动单例任务；
-  `GET` 轮询真实字节进度（`loaded/total/percent`），面板在**同一个弹窗**里更新进度条。
-- **慢而不断不算超时**：90 秒无新字节或 20 分钟总时长才算失败；
-  失败文案明确说明「国内访问 GitHub 较慢」并给浏览器下载地址。
-- **永远有出口**：确认弹窗、进行中弹窗、失败/取消弹窗都带官方下载地址；
-  进行中可点「取消并改手动安装」，失败弹窗给手动放置路径三步指引。
-- **不放松校验**：仍是官方源 + 官方字节数 + PE/Mach-O/ELF 魔数，取消/失败会清残留。
-
-回归：`test/install-progress.mjs`（状态机/进度/取消/超时/单例 + 真实路由）、
-`test/install-continue.mjs`（面板五条链路：进度、失败、慢下载、取消、复用）。
+回归：`test/install-continue.mjs`（25 断言：指令完整性、六平台地址、自动全选、
+复制成功/失败兜底、**不再触发网关下载**、装好继续/没装不冒进）、
+`test/update-dialog.mjs`（含 `clipboard.writeText` 永久挂起的 800ms 降级断言）、
+`test/install-progress.mjs`（服务端状态机保留）。
 
 ## 13. 下一步
 
