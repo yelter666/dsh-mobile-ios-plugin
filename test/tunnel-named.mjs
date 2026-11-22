@@ -154,7 +154,7 @@ try {
   check('ingress 末条是兜底规则', rules.length === 2 && !rules[1].hostname && rules[1].service === 'http_status:404');
 
   const dnsCall = cf.calls.find((c) => c.method === 'POST' && c.path.includes('/dns_records'));
-  check('DNS 建 CNAME 到 tunnel', dnsCall?.body?.type === 'CNAME' && dnsCall.body.content === 'tun_1.cfdargotunnel.com',
+  check('DNS 建 CNAME 到 tunnel', dnsCall?.body?.type === 'CNAME' && dnsCall.body.content === 'tun_1.cfargotunnel.com',
     JSON.stringify(dnsCall?.body));
   check('DNS 记录走 Cloudflare 代理', dnsCall?.body?.proxied === true);
   check('DNS 记录名是完整域名', dnsCall?.body?.name === first.hostname);

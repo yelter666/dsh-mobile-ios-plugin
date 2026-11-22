@@ -495,7 +495,7 @@ export class CloudflareProvisioner extends BaseProvisioner {
   }
 
   async #upsertDns(zoneId, fqdn, tunnelId) {
-    const target = `${tunnelId}.cfdargotunnel.com`;
+    const target = `${tunnelId}.cfargotunnel.com`;
     const list = await this.#api(
       'GET',
       `/zones/${zoneId}/dns_records?type=CNAME&name=${encodeURIComponent(fqdn)}`,

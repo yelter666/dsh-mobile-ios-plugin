@@ -204,7 +204,7 @@ export function createEnrollHandler(env, { fetchImpl = globalThis.fetch } = {}) 
           },
         });
 
-      const target = `${tunnel.id}.cfdargotunnel.com`;
+      const target = `${tunnel.id}.cfargotunnel.com`;
       const records = await cfApi(fetchImpl, env.CF_API_TOKEN, 'GET',
         `/zones/${zoneId}/dns_records?type=CNAME&name=${encodeURIComponent(hostname)}`);
       const existing = (Array.isArray(records) ? records : [])[0];

@@ -126,7 +126,7 @@ async function post(handler, body, token = 'tok-good') {
   const dns = cf.calls.find((c) => c.method === 'POST' && c.path.includes('/dns_records'));
   check('DNS CNAME 指向本隧道且 proxied',
     dns?.body?.type === 'CNAME' && dns?.body?.name === 'dsh-abc1234567.matrixboard.cn'
-    && dns?.body?.content === 'tid-1.cfdargotunnel.com' && dns?.body?.proxied === true);
+    && dns?.body?.content === 'tid-1.cfargotunnel.com' && dns?.body?.proxied === true);
 }
 
 // 4. 幂等：同名 tunnel 复用、DNS 已正确则跳过
@@ -160,7 +160,7 @@ async function post(handler, body, token = 'tok-good') {
 {
   const cf = makeCf();
   cf.tunnels.set('dsh-localll11', { id: 'tid-local', name: 'dsh-localll11', remote_config: false, deleted_at: null });
-  cf.dns.set('dsh-localll11.matrixboard.cn', 'tid-local.cfdargotunnel.com');
+  cf.dns.set('dsh-localll11.matrixboard.cn', 'tid-local.cfargotunnel.com');
   const handler = createEnrollHandler(ENV, { fetchImpl: cf.impl });
   const res = await post(handler, { hostId: 'h', port: 3081, subdomain: 'dsh-localll11' });
   const body = await res.json();
@@ -175,7 +175,7 @@ async function post(handler, body, token = 'tok-good') {
     creates.length === 1 && creates[0].body.config_src === 'cloudflare' && creates[0].body.name === 'dsh-localll11');
   const dns = cf.calls.find((c) => c.method === 'PUT' && c.path.includes('/dns_records/'));
   check('迁移后 DNS CNAME 重指到新隧道',
-    Boolean(dns) && dns.body.content === `${body.tunnelId}.cfdargotunnel.com`);
+    Boolean(dns) && dns.body.content === `${body.tunnelId}.cfargotunnel.com`);
 }
 {
   const cf = makeCf();
