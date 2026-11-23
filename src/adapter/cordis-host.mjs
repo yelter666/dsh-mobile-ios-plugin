@@ -20,6 +20,7 @@ import { isAbsolute, join as joinPath } from 'node:path';
 import os from 'node:os';
 import { fail, GatewayError } from '../protocol.mjs';
 import { displayHostName } from '../host-name.mjs';
+import { PLUGIN_VERSION } from '../version.mjs';
 import { translateLiveEvent } from './session-history.mjs';
 import { deriveArtifacts, decodeArtifactId, mimeOf, sniffMime } from './artifacts.mjs';
 
@@ -202,12 +203,50 @@ export function createCordisHost({ ctx, log = () => {}, hostname = displayHostNa
   }
 
   /**
-   * 桌面端登录账号（0.3.9，供手机设置页显示）。来源按序：
-   *   1. 插件 config.user（显式注入，运营可控）；
-   *   2. 宿主上下文宽容读取（ctx.get('user') / ctx.user —— 未来宿主提供
-   *      登录身份服务时零配置生效；字段名对齐 OpenAPI HostUser）。
+   * 桌面端登录账号（0.3.9 引入，0.3.10 加引擎第三源与缓存刷新），供手机设置页显示。
+   * 来源按序（先到先用）：
+   *   1. 插件 config.user（显式注入，运营可控，静态）；
+   *   2. 宿主上下文宽容读取（ctx.get('user') / ctx.user）；
+   *   3. 引擎 deepseekAccount 服务（ctx.get('deepseekAccount')，同进程直调
+   *      account/getProfile；契约见 @deepseek-ai/dsh-deepseek-account：
+   *      null=未登录 | {status:'ready', value:{id,name,contact,avatarUrl?}} | {status:'failed'}，
+   *      全部字段可空——纯 avatarUrl-only profile 也要能出）。
    * 都取不到就**不发 user 字段**——客户端显示「未登录」态。铁律：不编造数据。
+   *
+   * 缓存与刷新：引擎源是异步 RPC，info() 必须同步返回——启动时预热一次并缓存，
+   * 订阅 watchState 流，credentials-changed（登录/登出/凭证轮换）时重拉。
+   * 手机反复进设置页不再触发 RPC。已知边界：watchState 只推登录态变化，
+   * 不含 identity 变化（改名/换头像是 Host-only 订阅选项）——profile 偶发
+   * 变更要等下一次凭证事件或插件重启。
    */
+
+  /** 明文联系方式脱敏：已含 * 原样（平台侧可能已脱敏）；≥7 位才输出；过短丢弃防泄露。 */
+  function maskContact(c) {
+    if (typeof c !== 'string' || c.length === 0) return undefined;
+    if (c.includes('*')) return c;
+    if (c.length < 7) return undefined;
+    return `${c.slice(0, 3)}****${c.slice(-4)}`;
+  }
+
+  /** 任意来源的原始账号对象 → 标准 HostUser 子集；四个可展示字段全空才视为「无」。
+   *  （0.3.10 修复：别名表补 name；守卫从「id+nickname 都缺就丢」放宽为
+   *  「全字段都缺才丢」——纯引擎 profile {name, avatarUrl, contact} 无 id 不再整条丢弃。） */
+  function normalizeUser(c) {
+    if (!c || typeof c !== 'object') return undefined;
+    // 别名宽容（与 iOS 端解码同一套）：id/uid/userId、nickname/name/displayName/username、
+    // avatarUrl/avatar/avatarURL/avatarUri、maskedContact/contact。
+    const id = c.id ?? c.uid ?? c.userId;
+    const nickname = c.nickname ?? c.name ?? c.displayName ?? c.username;
+    const avatarUrl = c.avatarUrl ?? c.avatar ?? c.avatarURL ?? c.avatarUri;
+    const masked = c.maskedContact ?? maskContact(c.contact);
+    const out = {};
+    if (typeof id === 'string' && id.length > 0) out.id = id;
+    if (typeof nickname === 'string' && nickname.length > 0) out.nickname = nickname;
+    if (typeof avatarUrl === 'string' && avatarUrl.length > 0) out.avatarUrl = avatarUrl;
+    if (typeof masked === 'string' && masked.length > 0) out.maskedContact = masked;
+    return Object.keys(out).length > 0 ? out : undefined;
+  }
+
   function resolveUser() {
     const cands = [user];
     try {
@@ -215,24 +254,57 @@ export function createCordisHost({ ctx, log = () => {}, hostname = displayHostNa
     } catch { /* 服务不存在视为未提供 */ }
     try { cands.push(ctx.user); } catch { /* 受控代理读取失败视为未提供 */ }
     for (const c of cands) {
-      if (!c || typeof c !== 'object') continue;
-      // 别名宽容（与 iOS 端解码同一套）：id/uid、nickname/displayName/username、
-      // avatarUrl/avatar/avatarURL/avatarUri、maskedContact/contact。
-      const id = c.id ?? c.uid ?? c.userId;
-      const nickname = c.nickname ?? c.displayName ?? c.username;
-      if (id === undefined && nickname === undefined) continue;
-      const avatarUrl = c.avatarUrl ?? c.avatar ?? c.avatarURL ?? c.avatarUri;
-      const maskedContact = c.maskedContact ?? c.contact;
-      const out = {};
-      if (typeof id === 'string') out.id = id;
-      if (typeof nickname === 'string') out.nickname = nickname;
-      if (typeof avatarUrl === 'string') out.avatarUrl = avatarUrl;
-      if (typeof maskedContact === 'string') out.maskedContact = maskedContact;
-      if (Object.keys(out).length > 0) return out;
+      const u = normalizeUser(c);
+      if (u) return u;
     }
     return undefined;
   }
   const hostUser = resolveUser();
+
+  // ── 引擎源（第三数据源）：异步预热 + 事件刷新缓存 ──
+  let engineUser;
+  let engineAccountWatchAbort = null;
+  const accountReady = (async () => {
+    if (hostUser) return; // 显式配置在场时引擎源不参与，避免两套真相打架
+    let svc = null;
+    try {
+      if (typeof ctx.get === 'function') svc = ctx.get('deepseekAccount');
+    } catch { /* 服务不存在：引擎源不可用 */ }
+    if (!svc) { try { svc = ctx.deepseekAccount; } catch { /* 受控代理读取失败 */ } }
+    if (!svc || typeof svc.getProfile !== 'function') return;
+    // account/getProfile 的 client 元数据是 strict 必填（version/locale/timezoneOffsetSeconds）
+    const clientMeta = {
+      version: PLUGIN_VERSION,
+      locale: 'zh-CN',
+      timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60,
+    };
+    const refresh = async () => {
+      try {
+        const r = await svc.getProfile(clientMeta);
+        engineUser = r && r.status === 'ready' ? normalizeUser(r.value) : undefined;
+      } catch { engineUser = undefined; }
+    };
+    await refresh();
+    if (typeof svc.watchState !== 'function') return;
+    try {
+      engineAccountWatchAbort = new AbortController();
+      const stream = svc.watchState(engineAccountWatchAbort.signal);
+      if (stream && typeof stream[Symbol.asyncIterator] === 'function') {
+        void (async () => {
+          try {
+            for await (const upd of stream) {
+              if (engineAccountWatchAbort?.signal.aborted) break;
+              // signed-out 清缓存；credential-stored（登录成功/凭证轮换）重拉 profile
+              if (upd?.state?.status === 'signed-out') engineUser = undefined;
+              else await refresh();
+            }
+          } catch { /* 流断开：保留最后缓存；插件重启自然恢复，不做重连循环 */ }
+        })();
+      } else {
+        engineAccountWatchAbort = null;
+      }
+    } catch { /* watch 不可用不影响缓存 */ }
+  })();
 
   /** 解析宿主服务：cordis 服务在子上下文上向上解析；取不到显式 4021。 */
   function service(name, method) {
@@ -906,7 +978,8 @@ export function createCordisHost({ ctx, log = () => {}, hostname = displayHostNa
         caps: [...SERVED_CAPS],
         services,
         maxConcurrentTasks: 3,
-        ...(hostUser ? { user: { ...hostUser } } : {}),
+        // 登录账号：显式配置（静态）优先，否则用引擎缓存（启动预热 + watchState 事件刷新）
+        ...(hostUser ?? engineUser ? { user: { ...(hostUser ?? engineUser) } } : {}),
       };
     },
 
@@ -1638,7 +1711,13 @@ export function createCordisHost({ ctx, log = () => {}, hostname = displayHostNa
       };
     },
 
-    async close() {},
+    /** 引擎账号源预热完成（测试与诊断用；info() 本身同步读缓存，无需等待） */
+    whenAccountReady: () => accountReady,
+
+    async close() {
+      // 宿主卸载插件时停掉账号事件订阅，不留孤儿 listener / 生成器
+      try { engineAccountWatchAbort?.abort(); } catch { /* 已 abort 不碍事 */ }
+    },
   };
 
   return host;
