@@ -79,7 +79,13 @@ export function apply(ctx = {}, config = {}) {
     log(`boot  version=${version} hostKind=${hostKind} port=${config.port || process.env.DSH_MOBILE_PORT || 3081}`);
     const host =
       hostKind === 'mux' || hostKind === 'cordis'
-        ? createCordisHost({ ctx, log, hostname: config.hostName })
+        ? createCordisHost({
+            ctx, log,
+            hostname: config.hostName,
+            // 桌面端登录账号（0.3.9）：config.user / config.hostUser 二选一；
+            // 都没有时适配器内部还会尝试宿主上下文，最终取不到就不发字段。
+            user: config.user || config.hostUser,
+          })
         : hostKind === 'http'
           ? createMuxHost({ baseUrl: config.muxUrl || process.env.DSH_MUX_URL, token: config.muxToken, log })
           : createMockHost({ log, autoPlay: Boolean(config.autoPlay) });

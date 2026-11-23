@@ -18,3 +18,11 @@
         # 宿主形态（X2 闭环）：显式 mux——进程内直取宿主 cordis 服务
         # （sessionController/agents/llm…），真数据进手机；mock 需显式 config.host='mock'
         host: mux
+        # 桌面端登录账号（0.3.9，可选）：下发到手机设置页（OpenAPI HostInfo.user）。
+        # 不写则插件尝试从宿主上下文读取，仍取不到就不发字段（手机显示「未登录」态）。
+        # 注意 maskedContact 必须是已脱敏形式，禁止明文手机号；头像走 URL 不内联 base64。
+        # user:
+        #   id: u_xxx
+        #   nickname: 大葉
+        #   avatarUrl: https://…
+        #   maskedContact: 138****6688

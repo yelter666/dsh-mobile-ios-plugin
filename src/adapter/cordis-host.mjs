@@ -196,10 +196,43 @@ function unwrapEnhancedText(raw) {
   return text;
 }
 
-export function createCordisHost({ ctx, log = () => {}, hostname = displayHostName() } = {}) {
+export function createCordisHost({ ctx, log = () => {}, hostname = displayHostName(), user = undefined } = {}) {
   if (!ctx || (typeof ctx.get !== 'function' && typeof ctx !== 'object')) {
     throw new Error('createCordisHost 需要 cordis 上下文（ctx）');
   }
+
+  /**
+   * 桌面端登录账号（0.3.9，供手机设置页显示）。来源按序：
+   *   1. 插件 config.user（显式注入，运营可控）；
+   *   2. 宿主上下文宽容读取（ctx.get('user') / ctx.user —— 未来宿主提供
+   *      登录身份服务时零配置生效；字段名对齐 OpenAPI HostUser）。
+   * 都取不到就**不发 user 字段**——客户端显示「未登录」态。铁律：不编造数据。
+   */
+  function resolveUser() {
+    const cands = [user];
+    try {
+      if (typeof ctx.get === 'function') cands.push(ctx.get('user'));
+    } catch { /* 服务不存在视为未提供 */ }
+    try { cands.push(ctx.user); } catch { /* 受控代理读取失败视为未提供 */ }
+    for (const c of cands) {
+      if (!c || typeof c !== 'object') continue;
+      // 别名宽容（与 iOS 端解码同一套）：id/uid、nickname/displayName/username、
+      // avatarUrl/avatar/avatarURL/avatarUri、maskedContact/contact。
+      const id = c.id ?? c.uid ?? c.userId;
+      const nickname = c.nickname ?? c.displayName ?? c.username;
+      if (id === undefined && nickname === undefined) continue;
+      const avatarUrl = c.avatarUrl ?? c.avatar ?? c.avatarURL ?? c.avatarUri;
+      const maskedContact = c.maskedContact ?? c.contact;
+      const out = {};
+      if (typeof id === 'string') out.id = id;
+      if (typeof nickname === 'string') out.nickname = nickname;
+      if (typeof avatarUrl === 'string') out.avatarUrl = avatarUrl;
+      if (typeof maskedContact === 'string') out.maskedContact = maskedContact;
+      if (Object.keys(out).length > 0) return out;
+    }
+    return undefined;
+  }
+  const hostUser = resolveUser();
 
   /** 解析宿主服务：cordis 服务在子上下文上向上解析；取不到显式 4021。 */
   function service(name, method) {
@@ -873,6 +906,7 @@ export function createCordisHost({ ctx, log = () => {}, hostname = displayHostNa
         caps: [...SERVED_CAPS],
         services,
         maxConcurrentTasks: 3,
+        ...(hostUser ? { user: { ...hostUser } } : {}),
       };
     },
 

@@ -22,6 +22,9 @@ export function createMockData({ now = Date.now() } = {}) {
     platform: process.platform,
     protocolVersion: '1.0',
     caps: ['tasks.read', 'tasks.write', 'tasks.cancel', 'artifacts.read', 'tasks.settings', 'tasks.sessionActions', 'prompt.enhance'],
+    // 契约夹具的演示账号（0.3.9）：宿主登录信息下发能力见 HostInfo.user。
+    // 不给 avatarUrl —— 客户端退化为昵称首字头像，正好覆盖那条 UI 路径。
+    user: { id: 'u_demo', nickname: '大葉', maskedContact: '138****6688' },
   };
 
   const workspaces = [{ id: 'ws_mock', name: 'mock 工作区' }];
