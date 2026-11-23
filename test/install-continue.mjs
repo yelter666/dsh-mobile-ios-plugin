@@ -197,12 +197,13 @@ console.log('\ncloudflared → Harness Agent 安装指令链路回归\n');
   check('指令文本框自动全选（复制失败也能手动 ⌘C）', ta?._selected === true && Array.isArray(ta?._range));
   const text = ta?.value || '';
   check('指令写明交给 DeepSeek Harness 桌面端 Agent', text.includes('DeepSeek Harness') || allTexts(h.body).some((t) => t.includes('DeepSeek Harness')));
-  check('指令含 6 个平台官方地址', ['cloudflared-darwin-arm64.tgz', 'cloudflared-darwin-amd64.tgz', 'cloudflared-windows-amd64.exe', 'cloudflared-windows-386.exe', 'cloudflared-linux-amd64', 'cloudflared-linux-arm64'].every((f) => text.includes(`${DOWNLOAD_BASE}/${f}`)));
+  check('指令含官方 releases 页（Agent 自选平台）', text.includes('https://github.com/cloudflare/cloudflared/releases/tag/2026.11.1'));
   check('指令含 macOS/Linux 目标目录', text.includes('~/.dsh/mobile-access/components/cloudflared/2026.11.1/cloudflared'));
   check('指令含 Windows 目标目录', text.includes('\\.dsh\\mobile-access\\components\\cloudflared\\2026.11.1\\cloudflared.exe'));
+  check('Windows 路径用反引号包住（防 markdown 吞反斜杠）', /`%USERPROFILE%\\\.dsh/.test(text));
   check('指令含 --version 校验', text.includes('cloudflared --version'));
   check('指令含重开 Harness 让插件重新探测', text.includes('重启 DeepSeek Harness'));
-  check('指令含验收标准', text.includes('【验收】'));
+  check('指令含失败处理要求（错误原文回报）', text.includes('把错误原文告诉我'));
 }
 
 // 2. 关键：整条链路不再发起网关下载；复制走行内按钮 + 系统剪贴板端点

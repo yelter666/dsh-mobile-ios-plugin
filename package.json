@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-ios",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "type": "module",
   "description": "DSH iOS移动伴侣：iPhone/iPad 扫码连接 DSH 桌面端，局域网直连 + Cloudflare Tunnel 固定域名远程两种通道",
   "main": "entries/plugin.mjs",
